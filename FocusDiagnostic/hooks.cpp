@@ -26,12 +26,6 @@ struct ImportPatch { void** slot; void* original; void* replacement; };
 std::array<ImportPatch, 4> g_importPatches{};
 size_t g_importPatchCount{};
 
-void** g_d3d8Object{};
-void** g_d3d8OriginalVtable{};
-void** g_d3d8HookVtable{};
-void** g_d3dDeviceObject{};
-void** g_d3dDeviceOriginalVtable{};
-void** g_d3dDeviceHookVtable{};
 void** g_dinputObject{};
 void** g_dinputOriginalVtable{};
 void** g_dinputHookVtable{};
@@ -48,8 +42,6 @@ thread_local int g_lastCursorY = INT_MIN;
 thread_local ULONGLONG g_lastCursorLogAt = 0;
 thread_local unsigned g_suppressedCursorCalls = 0;
 std::atomic<bool> g_enableDirectInput{false};
-std::atomic<bool> g_enableD3DCreateDevice{false};
-std::atomic<bool> g_enableD3DDevice{false};
 
 struct HookSettings {
     bool window = false;
@@ -94,49 +86,6 @@ bool ReplaceVtable(void* object, void*** savedOriginal, void*** savedHook,
     *objectVtable = clone;
     VirtualProtect(objectVtable, sizeof(void*), oldProtect, &oldProtect);
     return true;
-}
-
-template <size_t Count>
-bool PatchVtableInPlace(void* object, void*** savedOriginal, void*** savedPatched,
-                        size_t index, void* replacement) {
-    if (!object) return false;
-    void** vtable = *reinterpret_cast<void***>(object);
-    if (*savedPatched) return *savedPatched == vtable;
-    void** backup = static_cast<void**>(VirtualAlloc(nullptr, Count * sizeof(void*),
-                                                      MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
-    if (!backup) return false;
-    memcpy(backup, vtable, Count * sizeof(void*));
-    DWORD oldProtect{};
-    if (!VirtualProtect(&vtable[index], sizeof(void*), PAGE_EXECUTE_READWRITE, &oldProtect)) {
-        VirtualFree(backup, 0, MEM_RELEASE);
-        return false;
-    }
-    vtable[index] = replacement;
-    VirtualProtect(&vtable[index], sizeof(void*), oldProtect, &oldProtect);
-    FlushInstructionCache(GetCurrentProcess(), &vtable[index], sizeof(void*));
-    *savedOriginal = backup;
-    *savedPatched = vtable;
-    return true;
-}
-
-bool PatchExistingVtableSlot(void** vtable, size_t index, void* replacement) {
-    if (!vtable) return false;
-    DWORD oldProtect{};
-    if (!VirtualProtect(&vtable[index], sizeof(void*), PAGE_EXECUTE_READWRITE, &oldProtect))
-        return false;
-    vtable[index] = replacement;
-    VirtualProtect(&vtable[index], sizeof(void*), oldProtect, &oldProtect);
-    FlushInstructionCache(GetCurrentProcess(), &vtable[index], sizeof(void*));
-    return true;
-}
-
-void RestoreVtableInPlace(void**& backup, void**& patched, const size_t* indices, size_t count) {
-    if (!backup || !patched) return;
-    for (size_t item = 0; item < count; ++item)
-        PatchExistingVtableSlot(patched, indices[item], backup[indices[item]]);
-    VirtualFree(backup, 0, MEM_RELEASE);
-    backup = nullptr;
-    patched = nullptr;
 }
 
 void RestoreVtable(void** object, void** original, void**& hook) {
@@ -223,92 +172,9 @@ BOOL WINAPI HookSetCursorPos(int x, int y) {
     return result;
 }
 
-// This game invokes the D3D8 vtable as MSVC x86 C++ virtual methods
-// (__thiscall): `this` is passed in ECX and only explicit arguments are removed
-// from the stack. Hooks use __fastcall so ECX is preserved as `self`; EDX is a
-// required dummy parameter. Treating these entries as WINAPI/__stdcall causes
-// RTC #0 because the hook removes one extra pointer from the stack.
-using TestCooperativeLevelFn = HRESULT(__thiscall*)(void*);
-using ResetFn = HRESULT(__thiscall*)(void*, D3DPRESENT_PARAMETERS*);
-using PresentFn = HRESULT(__thiscall*)(void*, const RECT*, const RECT*, HWND, const RGNDATA*);
-using CreateDeviceFn = HRESULT(__thiscall*)(void*, UINT, D3DDEVTYPE, HWND, DWORD,
-                                            D3DPRESENT_PARAMETERS*, IDirect3DDevice8**);
-
-HRESULT __fastcall HookTestCooperativeLevel(void* self, void*) {
-    auto original = reinterpret_cast<TestCooperativeLevelFn>(g_d3dDeviceOriginalVtable[3]);
-    const HRESULT result = original(self);
-    State().cooperativeLevel = result;
-    Logger::Instance().Write("D3D8", "TestCooperativeLevel -> 0x%08lX (%s)", result, HResultName(result));
-    return result;
-}
-
-HRESULT __fastcall HookReset(void* self, void*, D3DPRESENT_PARAMETERS* parameters) {
-    if (parameters) Logger::Instance().Write("D3D8",
-        "Reset called: %ux%u format=%lu windowed=%s refresh=%u hDeviceWindow=%p",
-        parameters->BackBufferWidth, parameters->BackBufferHeight, parameters->BackBufferFormat,
-        parameters->Windowed ? "TRUE" : "FALSE", parameters->FullScreen_RefreshRateInHz,
-        parameters->hDeviceWindow);
-    auto original = reinterpret_cast<ResetFn>(g_d3dDeviceOriginalVtable[14]);
-    const HRESULT result = original(self, parameters);
-    State().lastReset = result;
-    Logger::Instance().Write("D3D8", "Reset -> 0x%08lX (%s)", result, HResultName(result));
-    return result;
-}
-
-HRESULT __fastcall HookPresent(void* self, void*, const RECT* source, const RECT* destination,
-                               HWND overrideWindow, const RGNDATA* dirtyRegion) {
-    auto original = reinterpret_cast<PresentFn>(g_d3dDeviceOriginalVtable[15]);
-    const HRESULT result = original(self, source, destination, overrideWindow, dirtyRegion);
-    const bool wasRecovering = State().recovering;
-    RecordPresent(result);
-    if (FAILED(result) || wasRecovering)
-        Logger::Instance().Write("D3D8", "Present -> 0x%08lX (%s); frame=%llu",
-                                 result, HResultName(result), State().frames.load());
-    return result;
-}
-
-HRESULT __fastcall HookCreateDevice(void* self, void*, UINT adapter, D3DDEVTYPE type,
-                                    HWND focusWindow, DWORD behavior,
-                                    D3DPRESENT_PARAMETERS* parameters,
-                                    IDirect3DDevice8** device) {
-    auto original = reinterpret_cast<CreateDeviceFn>(g_d3d8OriginalVtable[14]);
-    const HRESULT result = original(self, adapter, type, focusWindow, behavior, parameters, device);
-    Logger::Instance().Write("D3D8", "CreateDevice(adapter=%u, window=%p) -> 0x%08lX (%s), device=%p",
-                             adapter, focusWindow, result, HResultName(result), device ? *device : nullptr);
-    if (SUCCEEDED(result) && device && *device) {
-        g_d3dDeviceObject = reinterpret_cast<void**>(*device);
-        if (g_enableD3DDevice.load(std::memory_order_acquire)) {
-            const bool installed =
-                PatchVtableInPlace<97>(*device, &g_d3dDeviceOriginalVtable, &g_d3dDeviceHookVtable,
-                                       3, reinterpret_cast<void*>(HookTestCooperativeLevel)) &&
-                PatchExistingVtableSlot(g_d3dDeviceHookVtable, 14, reinterpret_cast<void*>(HookReset)) &&
-                PatchExistingVtableSlot(g_d3dDeviceHookVtable, 15, reinterpret_cast<void*>(HookPresent));
-            if (installed) {
-                State().d3dObserved = true;
-                Logger::Instance().Write("D3D8", "Device method hooks installed in shared vtable");
-            } else {
-                constexpr size_t indices[] = {3, 14, 15};
-                RestoreVtableInPlace(g_d3dDeviceOriginalVtable, g_d3dDeviceHookVtable,
-                                     indices, _countof(indices));
-                Logger::Instance().Write("D3D8", "Device method hook installation failed; changes rolled back");
-            }
-        }
-        if (focusWindow) State().gameWindow = focusWindow;
-    }
-    return result;
-}
-
 IDirect3D8* WINAPI HookDirect3DCreate8(UINT sdkVersion) {
     IDirect3D8* result = g_direct3DCreate8(sdkVersion);
     Logger::Instance().Write("D3D8", "Direct3DCreate8(%u) -> %p", sdkVersion, result);
-    if (result && g_enableD3DCreateDevice.load(std::memory_order_acquire)) {
-        g_d3d8Object = reinterpret_cast<void**>(result);
-        const bool installed = PatchVtableInPlace<15>(
-            result, &g_d3d8OriginalVtable, &g_d3d8HookVtable,
-            14, reinterpret_cast<void*>(HookCreateDevice));
-        Logger::Instance().Write("D3D8", "CreateDevice hook in shared vtable -> %s",
-                                 installed ? "OK" : "FAILED");
-    }
     return result;
 }
 
@@ -410,11 +276,11 @@ BOOL CALLBACK FindWindowCallback(HWND window, LPARAM output) {
 bool InstallHooks(HMODULE self) {
     g_self = self;
     const HookSettings settings = LoadHookSettings(self);
-    const bool enableD3DCreateDevice = settings.d3d8 && settings.d3d8CreateDevice;
-    const bool enableD3DDevice = enableD3DCreateDevice && settings.d3d8Device;
+    // Delta Force 1.5.0.5 calls through this D3D8 vtable with an ABI that does
+    // not match either the documented COM __stdcall ABI or MSVC __thiscall.
+    // Both variants corrupt ESP in the game's Debug runtime. Keep factory-only
+    // observation until a target-specific assembly bridge is available.
     g_enableDirectInput.store(settings.directInput, std::memory_order_release);
-    g_enableD3DCreateDevice.store(enableD3DCreateDevice, std::memory_order_release);
-    g_enableD3DDevice.store(enableD3DDevice, std::memory_order_release);
     HMODULE executable = GetModuleHandleW(nullptr);
     if (settings.cursor) {
         PatchImport(executable, "USER32.dll", "ClipCursor", reinterpret_cast<void*>(HookClipCursor),
@@ -439,7 +305,8 @@ bool InstallHooks(HMODULE self) {
     }
     Logger::Instance().Write("DIAGNOSTIC", "Hook mode: window=%s d3d8=%s create-device=%s device-methods=%s dinput8=%s cursor=%s",
         g_originalWndProc ? "YES" : "NO", d3d ? "YES" : "NO",
-        enableD3DCreateDevice ? "YES" : "NO", enableD3DDevice ? "YES" : "NO",
+        settings.d3d8CreateDevice ? "DISABLED-ABI" : "NO",
+        settings.d3d8Device ? "DISABLED-ABI" : "NO",
         settings.directInput ? "YES" : "PROXY-ONLY",
         (g_clipCursor || g_setCursorPos) ? "YES" : "NO");
     return true;
@@ -462,12 +329,6 @@ void RemoveHooks() {
     RestoreVtable(g_keyboardObject, g_keyboardOriginalVtable, g_keyboardHookVtable);
     RestoreVtable(g_mouseObject, g_mouseOriginalVtable, g_mouseHookVtable);
     RestoreVtable(g_dinputObject, g_dinputOriginalVtable, g_dinputHookVtable);
-    constexpr size_t deviceIndices[] = {3, 14, 15};
-    constexpr size_t d3d8Indices[] = {14};
-    RestoreVtableInPlace(g_d3dDeviceOriginalVtable, g_d3dDeviceHookVtable,
-                         deviceIndices, _countof(deviceIndices));
-    RestoreVtableInPlace(g_d3d8OriginalVtable, g_d3d8HookVtable,
-                         d3d8Indices, _countof(d3d8Indices));
     while (g_importPatchCount) {
         const ImportPatch patch = g_importPatches[--g_importPatchCount];
         if (!patch.slot || *patch.slot != patch.replacement) continue;

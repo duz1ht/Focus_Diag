@@ -50,25 +50,18 @@ DirectInput=0
 Cursor=0
 ```
 
-Teste novamente, depois habilite `DirectInput` e `Cursor`. Para Direct3D, use
-três etapas separadas: primeiro `D3D8=1`, depois `D3D8CreateDevice=1` e somente
-por último `D3D8Device=1`. Se o jogo voltar a fechar ao habilitar uma opção, deixe-a em `0` e
-guarde o último `FocusDiagnostic.log`; isso identifica o hook incompatível.
+Teste novamente, depois habilite `DirectInput`, `Cursor` e `D3D8`. Se o jogo
+voltar a fechar ao habilitar uma opção, deixe-a em `0` e guarde o último
+`FocusDiagnostic.log`; isso identifica o hook incompatível.
 
 `D3D8=1` intercepta apenas a função de fábrica e não altera objetos COM.
-`D3D8CreateDevice=1` adiciona a observação de `IDirect3D8::CreateDevice`.
-`D3D8Device=1` habilita `TestCooperativeLevel`, `Reset` e `Present`. Não ative
-uma etapa posterior sem manter as anteriores habilitadas.
-
-Os hooks D3D usam patch dos slots da vtable compartilhada em vez de substituir
-o ponteiro de vtable dentro do objeto COM. Essa abordagem mantém a identidade e
-o layout do objeto retornado pelo runtime antigo. Se qualquer slot não puder ser
-instalado, as mudanças parciais são revertidas.
-
-Para este executável x86, as chamadas virtuais D3D usam a convenção MSVC
-`__thiscall`. Os hooks são entradas `__fastcall` compatíveis, preservando `this`
-em `ECX`, enquanto as chamadas às funções originais usam `__thiscall`. Isso é
-necessário para manter `ESP` inalterado na volta da função.
+`D3D8CreateDevice` e `D3D8Device` estão reservados, mas desabilitados nesta
+versão. Os testes no Delta Force 1.5.0.5 mostraram corrupção de `ESP` ao
+interceptar `IDirect3D8::CreateDevice`, tanto com a ABI COM quanto com a ABI
+`__thiscall`. Colocar essas opções em `1` apenas produz `DISABLED-ABI` no log e
+não modifica nenhuma vtable. O modo D3D seguro registra somente
+`Direct3DCreate8`; portanto `Present`, `Reset` e o contador de frames não estão
+disponíveis nesta versão.
 
 Com `Window=1`, o procedimento de foco é:
 
@@ -80,10 +73,10 @@ Com `Window=1`, o procedimento de foco é:
 O logger registra:
 
 - ativação, foco, redimensionamento e mudança de display da janela;
-- `TestCooperativeLevel`, `Reset` e os primeiros `Present` da recuperação;
+- criação do objeto Direct3D 8 por `Direct3DCreate8`;
 - `Acquire` e `Unacquire` de mouse e teclado;
 - `ClipCursor` e `SetCursorPos` quando importados diretamente pelo executável;
-- contador de frames, HRESULTs legíveis e IDs das threads;
+- HRESULTs legíveis e IDs das threads;
 - `LIKELY FAILURE AREA` no snapshot e um resumo após timeout de cinco segundos.
 
 Categorias possíveis incluem `WINDOW_ACTIVATION`, `D3D_DEVICE_LOST`,
@@ -97,8 +90,7 @@ Categorias possíveis incluem `WINDOW_ACTIVATION`, `D3D_DEVICE_LOST`,
 - As funções Win32 e a fábrica `Direct3DCreate8` são interceptadas na IAT do
   executável principal; `DirectInput8Create` é capturada diretamente pela proxy.
 - Os objetos DirectInput capturados recebem uma cópia instrumentada de sua
-  vtable; para Direct3D, somente os slots necessários da vtable compartilhada
-  são temporariamente substituídos.
+  vtable. Objetos Direct3D não são modificados nesta versão.
 - Os eventos são enfileirados e uma thread separada grava o arquivo para reduzir
   interferência no timing do jogo.
 - A inicialização aguarda por até 30 segundos pela janela principal do processo.
