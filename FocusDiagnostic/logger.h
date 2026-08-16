@@ -28,7 +28,7 @@ private:
     std::atomic<bool> started_{false};
     std::atomic<bool> stopping_{false};
     mutable LARGE_INTEGER frequency_{};
-    LARGE_INTEGER started_{};
+    LARGE_INTEGER startCounter_{};
     std::mutex mutex_;
     std::deque<std::string> queue_;
 };

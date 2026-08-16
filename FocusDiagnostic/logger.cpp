@@ -22,7 +22,7 @@ bool Logger::Start(HMODULE module) {
                         FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file_ == INVALID_HANDLE_VALUE) return false;
     QueryPerformanceFrequency(&frequency_);
-    QueryPerformanceCounter(&started_);
+    QueryPerformanceCounter(&startCounter_);
     event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (!event_) {
         CloseHandle(file_);
@@ -67,7 +67,7 @@ std::string Logger::Prefix(const char* category) const {
     LARGE_INTEGER now{};
     QueryPerformanceCounter(&now);
     const double milliseconds = frequency_.QuadPart
-        ? (now.QuadPart - started_.QuadPart) * 1000.0 / frequency_.QuadPart : 0.0;
+        ? (now.QuadPart - startCounter_.QuadPart) * 1000.0 / frequency_.QuadPart : 0.0;
     char text[128]{};
     sprintf_s(text, "[%012.3f] [TID %lu] [%s] ", milliseconds,
               GetCurrentThreadId(), category);
