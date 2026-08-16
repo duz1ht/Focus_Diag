@@ -18,7 +18,8 @@ antigo DirectX SDK nem bibliotecas externas de hooking.
 
 ## Instalar no jogo
 
-Copie `bin\Release\dinput8.dll` para a mesma pasta do executável do jogo. Quando
+Copie `bin\Release\dinput8.dll` e `bin\Release\FocusDiagnostic.ini` para a mesma
+pasta do executável do jogo. Quando
 o jogo importar `DirectInput8Create`, o Windows carregará automaticamente a
 proxy, que encaminhará as chamadas para a `dinput8.dll` original do diretório do
 sistema. Não é necessário usar um injetor. O jogo precisa ser x86.
@@ -31,6 +32,27 @@ não tiver permissão de escrita nessa pasta, execute a partir de uma pasta
 gravável ou ajuste as permissões.
 
 ## Procedimento de teste
+
+Por segurança, o arquivo fornecido começa em modo **proxy-only**, com todos os
+hooks invasivos desligados. Primeiro execute o jogo dessa forma e confirme que a
+janela abre normalmente. O log deve conter `dinput8=PROXY-ONLY`.
+
+Depois, feche o jogo e habilite apenas um subsistema por vez em
+`FocusDiagnostic.ini`, nesta ordem recomendada:
+
+```ini
+[Hooks]
+Window=1
+D3D8=0
+DirectInput=0
+Cursor=0
+```
+
+Teste novamente, depois habilite `DirectInput`, depois `D3D8` e por último
+`Cursor`. Se o jogo voltar a fechar ao habilitar uma opção, deixe-a em `0` e
+guarde o último `FocusDiagnostic.log`; isso identifica o hook incompatível.
+
+Com `Window=1`, o procedimento de foco é:
 
 1. Entre no gameplay e pressione **F10** para gravar `USER MARKER`.
 2. Faça `Alt+Tab`, aguarde e retorne ao jogo.

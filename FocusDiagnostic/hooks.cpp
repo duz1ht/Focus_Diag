@@ -5,6 +5,7 @@
 #include "logger.h"
 
 #include <array>
+#include <atomic>
 #include <cstring>
 
 namespace fd {
@@ -41,6 +42,28 @@ void** g_keyboardOriginalVtable{};
 void** g_keyboardHookVtable{};
 
 thread_local bool g_insideHook = false;
+std::atomic<bool> g_enableDirectInput{false};
+
+struct HookSettings {
+    bool window = false;
+    bool d3d8 = false;
+    bool directInput = false;
+    bool cursor = false;
+};
+
+HookSettings LoadHookSettings(HMODULE module) {
+    wchar_t path[MAX_PATH]{};
+    if (!GetModuleFileNameW(module, path, MAX_PATH)) return {};
+    wchar_t* slash = wcsrchr(path, L'\\');
+    if (slash) *(slash + 1) = L'\0';
+    wcscat_s(path, L"FocusDiagnostic.ini");
+    HookSettings settings;
+    settings.window = GetPrivateProfileIntW(L"Hooks", L"Window", 0, path) != 0;
+    settings.d3d8 = GetPrivateProfileIntW(L"Hooks", L"D3D8", 0, path) != 0;
+    settings.directInput = GetPrivateProfileIntW(L"Hooks", L"DirectInput", 0, path) != 0;
+    settings.cursor = GetPrivateProfileIntW(L"Hooks", L"Cursor", 0, path) != 0;
+    return settings;
+}
 
 template <size_t Count>
 bool ReplaceVtable(void* object, void*** savedOriginal, void*** savedHook,
@@ -298,32 +321,39 @@ BOOL CALLBACK FindWindowCallback(HWND window, LPARAM output) {
 
 bool InstallHooks(HMODULE self) {
     g_self = self;
+    const HookSettings settings = LoadHookSettings(self);
+    g_enableDirectInput.store(settings.directInput, std::memory_order_release);
     HMODULE executable = GetModuleHandleW(nullptr);
-    PatchImport(executable, "USER32.dll", "ClipCursor", reinterpret_cast<void*>(HookClipCursor),
-                reinterpret_cast<void**>(&g_clipCursor));
-    PatchImport(executable, "USER32.dll", "SetCursorPos", reinterpret_cast<void*>(HookSetCursorPos),
-                reinterpret_cast<void**>(&g_setCursorPos));
-    const bool d3d = PatchImport(executable, "d3d8.dll", "Direct3DCreate8",
+    if (settings.cursor) {
+        PatchImport(executable, "USER32.dll", "ClipCursor", reinterpret_cast<void*>(HookClipCursor),
+                    reinterpret_cast<void**>(&g_clipCursor));
+        PatchImport(executable, "USER32.dll", "SetCursorPos", reinterpret_cast<void*>(HookSetCursorPos),
+                    reinterpret_cast<void**>(&g_setCursorPos));
+    }
+    const bool d3d = settings.d3d8 && PatchImport(executable, "d3d8.dll", "Direct3DCreate8",
         reinterpret_cast<void*>(HookDirect3DCreate8), reinterpret_cast<void**>(&g_direct3DCreate8));
-    for (unsigned attempt = 0; attempt < 300 && !g_window; ++attempt) {
-        EnumWindows(FindWindowCallback, reinterpret_cast<LPARAM>(&g_window));
-        if (!g_window) Sleep(100);
+    if (settings.window) {
+        for (unsigned attempt = 0; attempt < 300 && !g_window; ++attempt) {
+            EnumWindows(FindWindowCallback, reinterpret_cast<LPARAM>(&g_window));
+            if (!g_window) Sleep(100);
+        }
+        if (g_window) {
+            State().gameWindow = g_window;
+            SetLastError(0);
+            g_originalWndProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
+                g_window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(HookWndProc)));
+            if (g_originalWndProc) SetTimer(g_window, kDiagnosticTimer, 1000, nullptr);
+        }
     }
-    if (g_window) {
-        State().gameWindow = g_window;
-        SetLastError(0);
-        g_originalWndProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
-            g_window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(HookWndProc)));
-        if (g_originalWndProc) SetTimer(g_window, kDiagnosticTimer, 1000, nullptr);
-    }
-    Logger::Instance().Write("DIAGNOSTIC", "Hooks installed: window=%s d3d8=%s dinput8=PROXY cursor=%s",
+    Logger::Instance().Write("DIAGNOSTIC", "Hook mode: window=%s d3d8=%s dinput8=%s cursor=%s",
         g_originalWndProc ? "YES" : "NO", d3d ? "YES" : "NO",
+        settings.directInput ? "YES" : "PROXY-ONLY",
         (g_clipCursor || g_setCursorPos) ? "YES" : "NO");
-    return g_originalWndProc || d3d;
+    return true;
 }
 
 void TrackDirectInputObject(IDirectInput8A* object) {
-    if (!object) return;
+    if (!object || !g_enableDirectInput.load(std::memory_order_acquire)) return;
     g_dinputObject = reinterpret_cast<void**>(object);
     if (ReplaceVtable<11>(object, &g_dinputOriginalVtable, &g_dinputHookVtable, 3,
                           reinterpret_cast<void*>(HookDInputCreateDevice))) {

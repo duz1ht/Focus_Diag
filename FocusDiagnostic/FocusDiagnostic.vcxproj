@@ -36,7 +36,10 @@
   <ItemGroup>
     <ClCompile Include="diagnostics.cpp" /><ClCompile Include="dinput8_proxy.cpp" /><ClCompile Include="dllmain.cpp" /><ClCompile Include="hooks.cpp" /><ClCompile Include="logger.cpp" />
   </ItemGroup>
-  <ItemGroup><None Include="dinput8_proxy.def" /></ItemGroup>
+  <ItemGroup>
+    <None Include="dinput8_proxy.def" />
+    <None Include="FocusDiagnostic.ini"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
+  </ItemGroup>
   <ItemGroup>
     <ClInclude Include="diagnostics.h" /><ClInclude Include="hooks.h" /><ClInclude Include="legacy_dx8.h" /><ClInclude Include="logger.h" />
   </ItemGroup>
