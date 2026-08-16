@@ -223,13 +223,18 @@ BOOL WINAPI HookSetCursorPos(int x, int y) {
     return result;
 }
 
-using TestCooperativeLevelFn = HRESULT(WINAPI*)(void*);
-using ResetFn = HRESULT(WINAPI*)(void*, D3DPRESENT_PARAMETERS*);
-using PresentFn = HRESULT(WINAPI*)(void*, const RECT*, const RECT*, HWND, const RGNDATA*);
-using CreateDeviceFn = HRESULT(WINAPI*)(void*, UINT, D3DDEVTYPE, HWND, DWORD,
-                                        D3DPRESENT_PARAMETERS*, IDirect3DDevice8**);
+// This game invokes the D3D8 vtable as MSVC x86 C++ virtual methods
+// (__thiscall): `this` is passed in ECX and only explicit arguments are removed
+// from the stack. Hooks use __fastcall so ECX is preserved as `self`; EDX is a
+// required dummy parameter. Treating these entries as WINAPI/__stdcall causes
+// RTC #0 because the hook removes one extra pointer from the stack.
+using TestCooperativeLevelFn = HRESULT(__thiscall*)(void*);
+using ResetFn = HRESULT(__thiscall*)(void*, D3DPRESENT_PARAMETERS*);
+using PresentFn = HRESULT(__thiscall*)(void*, const RECT*, const RECT*, HWND, const RGNDATA*);
+using CreateDeviceFn = HRESULT(__thiscall*)(void*, UINT, D3DDEVTYPE, HWND, DWORD,
+                                            D3DPRESENT_PARAMETERS*, IDirect3DDevice8**);
 
-HRESULT WINAPI HookTestCooperativeLevel(void* self) {
+HRESULT __fastcall HookTestCooperativeLevel(void* self, void*) {
     auto original = reinterpret_cast<TestCooperativeLevelFn>(g_d3dDeviceOriginalVtable[3]);
     const HRESULT result = original(self);
     State().cooperativeLevel = result;
@@ -237,7 +242,7 @@ HRESULT WINAPI HookTestCooperativeLevel(void* self) {
     return result;
 }
 
-HRESULT WINAPI HookReset(void* self, D3DPRESENT_PARAMETERS* parameters) {
+HRESULT __fastcall HookReset(void* self, void*, D3DPRESENT_PARAMETERS* parameters) {
     if (parameters) Logger::Instance().Write("D3D8",
         "Reset called: %ux%u format=%lu windowed=%s refresh=%u hDeviceWindow=%p",
         parameters->BackBufferWidth, parameters->BackBufferHeight, parameters->BackBufferFormat,
@@ -250,8 +255,8 @@ HRESULT WINAPI HookReset(void* self, D3DPRESENT_PARAMETERS* parameters) {
     return result;
 }
 
-HRESULT WINAPI HookPresent(void* self, const RECT* source, const RECT* destination,
-                           HWND overrideWindow, const RGNDATA* dirtyRegion) {
+HRESULT __fastcall HookPresent(void* self, void*, const RECT* source, const RECT* destination,
+                               HWND overrideWindow, const RGNDATA* dirtyRegion) {
     auto original = reinterpret_cast<PresentFn>(g_d3dDeviceOriginalVtable[15]);
     const HRESULT result = original(self, source, destination, overrideWindow, dirtyRegion);
     const bool wasRecovering = State().recovering;
@@ -262,9 +267,10 @@ HRESULT WINAPI HookPresent(void* self, const RECT* source, const RECT* destinati
     return result;
 }
 
-HRESULT WINAPI HookCreateDevice(void* self, UINT adapter, D3DDEVTYPE type, HWND focusWindow,
-                                DWORD behavior, D3DPRESENT_PARAMETERS* parameters,
-                                IDirect3DDevice8** device) {
+HRESULT __fastcall HookCreateDevice(void* self, void*, UINT adapter, D3DDEVTYPE type,
+                                    HWND focusWindow, DWORD behavior,
+                                    D3DPRESENT_PARAMETERS* parameters,
+                                    IDirect3DDevice8** device) {
     auto original = reinterpret_cast<CreateDeviceFn>(g_d3d8OriginalVtable[14]);
     const HRESULT result = original(self, adapter, type, focusWindow, behavior, parameters, device);
     Logger::Instance().Write("D3D8", "CreateDevice(adapter=%u, window=%p) -> 0x%08lX (%s), device=%p",

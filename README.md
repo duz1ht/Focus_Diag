@@ -65,6 +65,11 @@ o ponteiro de vtable dentro do objeto COM. Essa abordagem mantém a identidade e
 o layout do objeto retornado pelo runtime antigo. Se qualquer slot não puder ser
 instalado, as mudanças parciais são revertidas.
 
+Para este executável x86, as chamadas virtuais D3D usam a convenção MSVC
+`__thiscall`. Os hooks são entradas `__fastcall` compatíveis, preservando `this`
+em `ECX`, enquanto as chamadas às funções originais usam `__thiscall`. Isso é
+necessário para manter `ESP` inalterado na volta da função.
+
 Com `Window=1`, o procedimento de foco é:
 
 1. Entre no gameplay e pressione **F10** para gravar `USER MARKER`.
