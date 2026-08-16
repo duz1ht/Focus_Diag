@@ -41,14 +41,3 @@ void RestoreCursorClip(HWND gameWindow)
 ```
 
 Call `RestoreCursorClip` shortly after `WM_ACTIVATEAPP(TRUE)` or `WM_SETFOCUS`, preferably after the fullscreen `WM_DISPLAYCHANGE` event.
-
-```ini
-[Hooks]
-Window=1
-Cursor=1
-
-[Recovery]
-RestoreCursorClip=1
-RestoreCursorClipDelayMs=250
-WaitForDisplayChange=1
-```
