@@ -144,6 +144,7 @@ BOOL WINAPI HookClipCursor(const RECT* rect) {
     const BOOL result = g_clipCursor(rect);
     RECT actual{};
     GetClipCursor(&actual);
+    RecordClipState(rect, actual, result != FALSE);
     Logger::Instance().Write("CURSOR", "ClipCursor -> %s; actual=(%ld,%ld)-(%ld,%ld)",
         result ? "TRUE" : "FALSE", actual.left, actual.top, actual.right, actual.bottom);
     g_insideHook = false;
@@ -185,6 +186,7 @@ using UnacquireFn = HRESULT(WINAPI*)(void*);
 HRESULT WINAPI HookMouseAcquire(void* self) {
     auto original = reinterpret_cast<AcquireFn>(g_mouseOriginalVtable[7]);
     const HRESULT result = original(self);
+    State().mouseObserved = true;
     State().mouseAcquire = result;
     Logger::Instance().Write("DINPUT/MOUSE", "Acquire -> 0x%08lX (%s)", result, HResultName(result));
     return result;
@@ -198,6 +200,7 @@ HRESULT WINAPI HookMouseUnacquire(void* self) {
 HRESULT WINAPI HookKeyboardAcquire(void* self) {
     auto original = reinterpret_cast<AcquireFn>(g_keyboardOriginalVtable[7]);
     const HRESULT result = original(self);
+    State().keyboardObserved = true;
     State().keyboardAcquire = result;
     Logger::Instance().Write("DINPUT/KEYBOARD", "Acquire -> 0x%08lX (%s)", result, HResultName(result));
     return result;

@@ -27,9 +27,23 @@ const char* FailureAreaName(FailureArea area) {
 void BeginFocusLoss() {
     auto& s = State();
     if (!s.recovering.exchange(true)) {
+        s.restoreClipExpected = s.clipActive.load();
         ++s.attempt;
         s.focusReturnedAt = 0;
         Logger::Instance().Write("RECOVERY", "Attempt %lu: focus lost", s.attempt.load());
+    }
+}
+
+void RecordClipState(const RECT* requested, const RECT& actual, bool succeeded) {
+    if (!succeeded) return;
+    auto& s = State();
+    s.cursorObserved = true;
+    s.clipActive = requested != nullptr;
+    if (requested) {
+        s.expectedClipLeft = actual.left;
+        s.expectedClipTop = actual.top;
+        s.expectedClipRight = actual.right;
+        s.expectedClipBottom = actual.bottom;
     }
 }
 
@@ -60,8 +74,10 @@ static FailureArea Diagnose() {
         return FailureArea::WindowActivation;
     if (s.d3dObserved && s.cooperativeLevel == kD3DErrDeviceLost) return FailureArea::D3DDeviceLost;
     if (s.d3dObserved && FAILED(s.lastReset)) return FailureArea::D3DReset;
-    if (FAILED(s.keyboardAcquire)) return FailureArea::KeyboardAcquire;
-    if (FAILED(s.mouseAcquire)) return FailureArea::MouseAcquire;
+    if (s.keyboardObserved && FAILED(s.keyboardAcquire)) return FailureArea::KeyboardAcquire;
+    if (s.mouseObserved && FAILED(s.mouseAcquire)) return FailureArea::MouseAcquire;
+    if (s.cursorObserved && s.restoreClipExpected && !s.clipActive)
+        return FailureArea::CursorState;
     RECT client{}, clip{};
     if (game && GetClientRect(game, &client) && GetClipCursor(&clip)) {
         POINT center{(client.left + client.right) / 2, (client.top + client.bottom) / 2};
@@ -100,8 +116,13 @@ void WriteSnapshot(const char* reason) {
         cooperative, HResultName(cooperative), reset, HResultName(reset));
     Logger::Instance().Write("SNAPSHOT", "d3d monitoring=%s",
                              s.d3dObserved ? "ACTIVE" : "NOT ACTIVE");
-    Logger::Instance().Write("SNAPSHOT", "keyboard=0x%08lX (%s) mouse=0x%08lX (%s)",
-        keyboard, HResultName(keyboard), mouse, HResultName(mouse));
+    Logger::Instance().Write("SNAPSHOT", "keyboard=%s mouse=%s",
+        s.keyboardObserved ? HResultName(keyboard) : "NOT OBSERVED",
+        s.mouseObserved ? HResultName(mouse) : "NOT OBSERVED");
+    Logger::Instance().Write("SNAPSHOT", "cursor observed=%s clip expected=%s clip active=%s expected=(%ld,%ld)-(%ld,%ld)",
+        s.cursorObserved ? "YES" : "NO", s.restoreClipExpected ? "YES" : "NO",
+        s.clipActive ? "YES" : "NO", s.expectedClipLeft.load(), s.expectedClipTop.load(),
+        s.expectedClipRight.load(), s.expectedClipBottom.load());
     Logger::Instance().Write("SNAPSHOT", "LIKELY FAILURE AREA: %s", FailureAreaName(failure));
 }
 
@@ -110,6 +131,14 @@ void CheckRecoveryTimeout() {
     const ULONGLONG returned = s.focusReturnedAt;
     if (s.recovering && returned && GetTickCount64() - returned >= 5000) {
         if (!s.d3dObserved) {
+            const FailureArea observedFailure = Diagnose();
+            if (observedFailure != FailureArea::Inconclusive) {
+                Logger::Instance().Write("RECOVERY", "Attempt %lu FAILURE; first divergence=%s",
+                                         s.attempt.load(), FailureAreaName(observedFailure));
+                WriteSnapshot("RECOVERY FAILURE - D3D NOT MONITORED");
+                s.recovering = false;
+                return;
+            }
             Logger::Instance().Write("RECOVERY",
                 "Attempt %lu PARTIAL; window recovered; D3D device methods not monitored",
                 s.attempt.load());

@@ -112,3 +112,7 @@ Categorias possíveis incluem `WINDOW_ACTIVATION`, `D3D_DEVICE_LOST`,
   `Present` como `RENDER_LOOP`.
 - Em uma recuperação com monitoramento D3D desligado, o timeout é registrado
   como `PARTIAL`/`D3D NOT MONITORED`, e não como falha do render loop.
+- O diagnóstico memoriza o último clipping ativo antes da perda de foco. Se o
+  jogo liberar o clipping no Alt+Tab e não o restaurar após cinco segundos, o
+  resultado será `CURSOR_STATE`. Mouse e teclado aparecem como `NOT OBSERVED`
+  até que uma chamada real de `Acquire` seja interceptada.
