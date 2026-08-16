@@ -16,6 +16,7 @@ HMODULE g_self{};
 HWND g_window{};
 WNDPROC g_originalWndProc{};
 constexpr UINT_PTR kDiagnosticTimer = 0xF0C05;
+constexpr UINT_PTR kCursorRecoveryTimer = 0xF0C06;
 
 using ClipCursorFn = BOOL(WINAPI*)(const RECT*);
 using SetCursorPosFn = BOOL(WINAPI*)(int, int);
@@ -42,6 +43,9 @@ thread_local int g_lastCursorY = INT_MIN;
 thread_local ULONGLONG g_lastCursorLogAt = 0;
 thread_local unsigned g_suppressedCursorCalls = 0;
 std::atomic<bool> g_enableDirectInput{false};
+bool g_restoreCursorClip = false;
+bool g_waitForDisplayChange = true;
+UINT g_restoreCursorClipDelayMs = 250;
 
 struct HookSettings {
     bool window = false;
@@ -50,6 +54,12 @@ struct HookSettings {
     bool d3d8Device = false;
     bool directInput = false;
     bool cursor = false;
+    bool restoreCursorClip = false;
+    bool waitForDisplayChange = true;
+    bool useSetCapture = false;
+    bool forceWindowActivation = false;
+    bool forceDirectInputAcquire = false;
+    UINT restoreCursorClipDelayMs = 250;
 };
 
 HookSettings LoadHookSettings(HMODULE module) {
@@ -65,6 +75,13 @@ HookSettings LoadHookSettings(HMODULE module) {
     settings.d3d8Device = GetPrivateProfileIntW(L"Hooks", L"D3D8Device", 0, path) != 0;
     settings.directInput = GetPrivateProfileIntW(L"Hooks", L"DirectInput", 0, path) != 0;
     settings.cursor = GetPrivateProfileIntW(L"Hooks", L"Cursor", 0, path) != 0;
+    settings.restoreCursorClip = GetPrivateProfileIntW(L"Recovery", L"RestoreCursorClip", 0, path) != 0;
+    settings.waitForDisplayChange = GetPrivateProfileIntW(L"Recovery", L"WaitForDisplayChange", 1, path) != 0;
+    const UINT delay = GetPrivateProfileIntW(L"Recovery", L"RestoreCursorClipDelayMs", 250, path);
+    settings.restoreCursorClipDelayMs = delay < 1 ? 1 : (delay > 10000 ? 10000 : delay);
+    settings.useSetCapture = GetPrivateProfileIntW(L"Recovery", L"UseSetCapture", 0, path) != 0;
+    settings.forceWindowActivation = GetPrivateProfileIntW(L"Recovery", L"ForceWindowActivation", 0, path) != 0;
+    settings.forceDirectInputAcquire = GetPrivateProfileIntW(L"Recovery", L"ForceDirectInputAcquire", 0, path) != 0;
     return settings;
 }
 
@@ -234,30 +251,139 @@ HRESULT WINAPI HookDInputCreateDevice(void* self, REFGUID guid, IDirectInputDevi
     return result;
 }
 
+bool RectsEqual(const RECT& left, const RECT& right) {
+    return left.left == right.left && left.top == right.top &&
+           left.right == right.right && left.bottom == right.bottom;
+}
+
+void CancelCursorRecovery(bool releaseAppliedClip) {
+    if (g_window) KillTimer(g_window, kCursorRecoveryTimer);
+    auto& state = State();
+    state.clipRestorePending = false;
+    if (releaseAppliedClip && state.clipAppliedByDiagnostic.exchange(false) && g_clipCursor) {
+        const BOOL result = g_clipCursor(nullptr);
+        Logger::Instance().Write("CURSOR RECOVERY ACTION",
+            "Released diagnostic clip after focus loss -> %s", result ? "TRUE" : "FALSE");
+    }
+}
+
+void ArmCursorRecovery(bool displayModeConfirmed) {
+    if (!g_restoreCursorClip || !g_window || !g_clipCursor) return;
+    auto& state = State();
+    const unsigned long attempt = state.attempt.load();
+    if (!state.recovering || !state.restoreClipExpected ||
+        state.clipRestoredAttempt.load() == attempt)
+        return;
+
+    const UINT delay = displayModeConfirmed || !g_waitForDisplayChange
+        ? g_restoreCursorClipDelayMs : 2000 + g_restoreCursorClipDelayMs;
+    KillTimer(g_window, kCursorRecoveryTimer);
+    if (SetTimer(g_window, kCursorRecoveryTimer, delay, nullptr)) {
+        state.clipRestorePending = true;
+        Logger::Instance().Write("CURSOR RECOVERY ACTION",
+            "Attempt %lu armed; delay=%u ms; display-confirmed=%s", attempt, delay,
+            displayModeConfirmed ? "YES" : "NO");
+    }
+}
+
+void ApplyCursorRecovery() {
+    auto& state = State();
+    state.clipRestorePending = false;
+    const unsigned long attempt = state.attempt.load();
+    if (!g_restoreCursorClip || !state.recovering || !state.restoreClipExpected ||
+        state.clipRestoredAttempt.load() == attempt || !g_clipCursor)
+        return;
+
+    HWND game = state.gameWindow.load();
+    const bool validWindow = game && GetForegroundWindow() == game && GetFocus() == game &&
+                             !IsIconic(game) && IsWindowVisible(game);
+    RECT before{}, after{};
+    GetClipCursor(&before);
+    const RECT expected{state.expectedClipLeft.load(), state.expectedClipTop.load(),
+                        state.expectedClipRight.load(), state.expectedClipBottom.load()};
+    if (!validWindow) {
+        Logger::Instance().Write("CURSOR RECOVERY ACTION",
+            "Attempt %lu cancelled; game=%p foreground=%p focus=%p", attempt, game,
+            GetForegroundWindow(), GetFocus());
+        return;
+    }
+
+    BOOL result = TRUE;
+    const bool needed = !RectsEqual(before, expected);
+    if (needed) result = g_clipCursor(&expected);
+    GetClipCursor(&after);
+    state.clipRestoredAttempt = attempt;
+    state.clipAppliedByDiagnostic = needed && result && RectsEqual(after, expected);
+    Logger::Instance().Write("CURSOR RECOVERY ACTION",
+        "Attempt %lu expected=(%ld,%ld)-(%ld,%ld) before=(%ld,%ld)-(%ld,%ld) after=(%ld,%ld)-(%ld,%ld) needed=%s result=%s restored=%s hwnd=%p elapsed=%llu ms",
+        attempt, expected.left, expected.top, expected.right, expected.bottom,
+        before.left, before.top, before.right, before.bottom,
+        after.left, after.top, after.right, after.bottom, needed ? "YES" : "NO",
+        result ? "TRUE" : "FALSE", RectsEqual(after, expected) ? "YES" : "NO", game,
+        state.focusReturnedAt ? GetTickCount64() - state.focusReturnedAt.load() : 0);
+}
+
 LRESULT CALLBACK HookWndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
         case WM_ACTIVATE:
             Logger::Instance().Write("WINDOW", "WM_ACTIVATE -> %u", LOWORD(wParam));
-            if (LOWORD(wParam) == WA_INACTIVE) BeginFocusLoss(); else FocusReturned();
+            if (LOWORD(wParam) == WA_INACTIVE) {
+                CancelCursorRecovery(true);
+                BeginFocusLoss();
+            } else {
+                FocusReturned();
+                ArmCursorRecovery(false);
+            }
             break;
         case WM_ACTIVATEAPP:
             Logger::Instance().Write("WINDOW", "WM_ACTIVATEAPP -> %s", wParam ? "TRUE" : "FALSE");
-            if (wParam) FocusReturned(); else BeginFocusLoss();
+            if (wParam) {
+                FocusReturned();
+                ArmCursorRecovery(false);
+            } else {
+                CancelCursorRecovery(true);
+                BeginFocusLoss();
+            }
             break;
-        case WM_SETFOCUS: Logger::Instance().Write("WINDOW", "WM_SETFOCUS"); FocusReturned(); break;
-        case WM_KILLFOCUS: Logger::Instance().Write("WINDOW", "WM_KILLFOCUS"); BeginFocusLoss(); break;
+        case WM_SETFOCUS:
+            Logger::Instance().Write("WINDOW", "WM_SETFOCUS");
+            FocusReturned();
+            ArmCursorRecovery(false);
+            break;
+        case WM_KILLFOCUS:
+            Logger::Instance().Write("WINDOW", "WM_KILLFOCUS");
+            CancelCursorRecovery(true);
+            BeginFocusLoss();
+            break;
         case WM_SIZE: Logger::Instance().Write("WINDOW", "WM_SIZE -> %llu (%dx%d)",
             static_cast<unsigned long long>(wParam), LOWORD(lParam), HIWORD(lParam)); break;
         case WM_SYSCOMMAND: Logger::Instance().Write("WINDOW", "WM_SYSCOMMAND -> 0x%llX",
             static_cast<unsigned long long>(wParam)); break;
-        case WM_DISPLAYCHANGE: Logger::Instance().Write("WINDOW", "WM_DISPLAYCHANGE -> %dx%d",
-            LOWORD(lParam), HIWORD(lParam)); break;
+        case WM_DISPLAYCHANGE: {
+            const UINT width = LOWORD(lParam);
+            const UINT height = HIWORD(lParam);
+            Logger::Instance().Write("WINDOW", "WM_DISPLAYCHANGE -> %ux%u", width, height);
+            RecordDisplayChange(width, height);
+            auto& state = State();
+            if (state.recovering && state.focusReturnedAt &&
+                width == state.expectedDisplayWidth && height == state.expectedDisplayHeight)
+                ArmCursorRecovery(true);
+            break;
+        }
+        case WM_DESTROY:
+        case WM_NCDESTROY:
+            CancelCursorRecovery(true);
+            break;
         case WM_KEYDOWN:
             if (wParam == VK_F10) Logger::Instance().Write("MARKER", "========== USER MARKER ==========");
             if (wParam == VK_F11) WriteSnapshot("MANUAL SNAPSHOT");
             break;
         case WM_TIMER:
             if (wParam == kDiagnosticTimer) CheckRecoveryTimeout();
+            if (wParam == kCursorRecoveryTimer) {
+                KillTimer(window, kCursorRecoveryTimer);
+                ApplyCursorRecovery();
+            }
             break;
     }
     CheckRecoveryTimeout();
@@ -284,6 +410,9 @@ bool InstallHooks(HMODULE self) {
     // Both variants corrupt ESP in the game's Debug runtime. Keep factory-only
     // observation until a target-specific assembly bridge is available.
     g_enableDirectInput.store(settings.directInput, std::memory_order_release);
+    g_restoreCursorClip = settings.restoreCursorClip;
+    g_waitForDisplayChange = settings.waitForDisplayChange;
+    g_restoreCursorClipDelayMs = settings.restoreCursorClipDelayMs;
     HMODULE executable = GetModuleHandleW(nullptr);
     if (settings.cursor) {
         PatchImport(executable, "USER32.dll", "ClipCursor", reinterpret_cast<void*>(HookClipCursor),
@@ -312,6 +441,16 @@ bool InstallHooks(HMODULE self) {
         settings.d3d8Device ? "DISABLED-ABI" : "NO",
         settings.directInput ? "YES" : "PROXY-ONLY",
         (g_clipCursor || g_setCursorPos) ? "YES" : "NO");
+    Logger::Instance().Write("DIAGNOSTIC",
+        "Recovery mode: restore-clip=%s delay=%u wait-display=%s set-capture=%s force-window=%s force-acquire=%s",
+        settings.restoreCursorClip ? "YES" : "NO", settings.restoreCursorClipDelayMs,
+        settings.waitForDisplayChange ? "YES" : "NO", settings.useSetCapture ? "RESERVED" : "NO",
+        settings.forceWindowActivation ? "RESERVED" : "NO",
+        settings.forceDirectInputAcquire ? "RESERVED" : "NO");
+    if (settings.restoreCursorClip && (!settings.cursor || !settings.window))
+        Logger::Instance().Write("DIAGNOSTIC",
+            "RestoreCursorClip requires Hooks.Window=1 and Hooks.Cursor=1; action disabled");
+    if (!settings.cursor || !settings.window) g_restoreCursorClip = false;
     return true;
 }
 
@@ -326,6 +465,7 @@ void TrackDirectInputObject(IDirectInput8A* object) {
 
 void RemoveHooks() {
     if (g_window && g_originalWndProc) {
+        CancelCursorRecovery(true);
         KillTimer(g_window, kDiagnosticTimer);
         SetWindowLongPtrW(g_window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(g_originalWndProc));
     }

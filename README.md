@@ -116,3 +116,33 @@ Categorias possíveis incluem `WINDOW_ACTIVATION`, `D3D_DEVICE_LOST`,
   jogo liberar o clipping no Alt+Tab e não o restaurar após cinco segundos, o
   resultado será `CURSOR_STATE`. Mouse e teclado aparecem como `NOT OBSERVED`
   até que uma chamada real de `Acquire` seja interceptada.
+
+## Teste experimental de restauração do cursor
+
+Por padrão a DLL continua passiva. Para um teste A/B isolado, habilite:
+
+```ini
+[Recovery]
+RestoreCursorClip=1
+RestoreCursorClipDelayMs=250
+WaitForDisplayChange=1
+UseSetCapture=0
+ForceWindowActivation=0
+ForceDirectInputAcquire=0
+```
+
+Depois de `WM_SETFOCUS`/`WM_ACTIVATEAPP TRUE`, a DLL espera o modo de vídeo do
+jogo reaparecer e mais `RestoreCursorClipDelayMs`. Se o clipping real diferir do
+último retângulo ativo anterior ao Alt+Tab, ela reaplica esse retângulo uma única
+vez na tentativa e registra `CURSOR RECOVERY ACTION` com os estados anterior e
+posterior. Se a mudança de display não chegar, há um fallback de dois segundos.
+
+A ação só ocorre quando a janela ainda é foreground, focused, visível e não
+minimizada. Ao perder foco novamente, qualquer clipping aplicado pela DLL é
+liberado. `UseSetCapture`, `ForceWindowActivation` e `ForceDirectInputAcquire`
+são reservados e não executam ações nesta versão. Se o cursor ficar preso ou o
+jogo se comportar pior, volte imediatamente para `RestoreCursorClip=0`.
+
+Compare duas sessões idênticas, primeiro com `RestoreCursorClip=0` e depois com
+`RestoreCursorClip=1`, observando separadamente se o cursor escapa e se a
+sensação de performance em background muda.

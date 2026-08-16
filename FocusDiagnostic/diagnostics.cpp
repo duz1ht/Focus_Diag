@@ -5,6 +5,18 @@
 
 namespace fd {
 
+namespace {
+bool RectsEqual(const RECT& left, const RECT& right) {
+    return left.left == right.left && left.top == right.top &&
+           left.right == right.right && left.bottom == right.bottom;
+}
+
+RECT ExpectedClip(const DiagnosticState& state) {
+    return {state.expectedClipLeft.load(), state.expectedClipTop.load(),
+            state.expectedClipRight.load(), state.expectedClipBottom.load()};
+}
+}  // namespace
+
 DiagnosticState& State() {
     static DiagnosticState state;
     return state;
@@ -28,10 +40,21 @@ void BeginFocusLoss() {
     auto& s = State();
     if (!s.recovering.exchange(true)) {
         s.restoreClipExpected = s.clipActive.load();
+        s.expectedDisplayWidth = s.displayWidth.load();
+        s.expectedDisplayHeight = s.displayHeight.load();
+        s.displayChangeAfterFocus = false;
+        s.clipRestorePending = false;
         ++s.attempt;
         s.focusReturnedAt = 0;
         Logger::Instance().Write("RECOVERY", "Attempt %lu: focus lost", s.attempt.load());
     }
+}
+
+void RecordDisplayChange(UINT width, UINT height) {
+    auto& s = State();
+    s.displayWidth = width;
+    s.displayHeight = height;
+    if (s.recovering && s.focusReturnedAt) s.displayChangeAfterFocus = true;
 }
 
 void RecordClipState(const RECT* requested, const RECT& actual, bool succeeded) {
@@ -76,9 +99,10 @@ static FailureArea Diagnose() {
     if (s.d3dObserved && FAILED(s.lastReset)) return FailureArea::D3DReset;
     if (s.keyboardObserved && FAILED(s.keyboardAcquire)) return FailureArea::KeyboardAcquire;
     if (s.mouseObserved && FAILED(s.mouseAcquire)) return FailureArea::MouseAcquire;
-    if (s.cursorObserved && s.restoreClipExpected && !s.clipActive)
-        return FailureArea::CursorState;
     RECT client{}, clip{};
+    if (s.cursorObserved && s.restoreClipExpected && GetClipCursor(&clip) &&
+        !RectsEqual(clip, ExpectedClip(s)))
+        return FailureArea::CursorState;
     if (game && GetClientRect(game, &client) && GetClipCursor(&clip)) {
         POINT center{(client.left + client.right) / 2, (client.top + client.bottom) / 2};
         if (ClientToScreen(game, &center) && !PtInRect(&clip, center))
@@ -98,6 +122,8 @@ void WriteSnapshot(const char* reason) {
         GetClientRect(game, &client);
     }
     GetClipCursor(&clip);
+    const RECT expectedClip = ExpectedClip(s);
+    const bool clipRestored = s.restoreClipExpected && RectsEqual(clip, expectedClip);
     const FailureArea failure = Diagnose();
     Logger::Instance().Write("SNAPSHOT", "========== %s ==========", reason);
     Logger::Instance().Write("SNAPSHOT", "attempt=%lu frame=%llu recovering=%s",
@@ -119,10 +145,11 @@ void WriteSnapshot(const char* reason) {
     Logger::Instance().Write("SNAPSHOT", "keyboard=%s mouse=%s",
         s.keyboardObserved ? HResultName(keyboard) : "NOT OBSERVED",
         s.mouseObserved ? HResultName(mouse) : "NOT OBSERVED");
-    Logger::Instance().Write("SNAPSHOT", "cursor observed=%s clip expected=%s clip active=%s expected=(%ld,%ld)-(%ld,%ld)",
+    Logger::Instance().Write("SNAPSHOT", "cursor observed=%s clip expected=%s clip active=%s clip restored=%s expected=(%ld,%ld)-(%ld,%ld) actual=(%ld,%ld)-(%ld,%ld)",
         s.cursorObserved ? "YES" : "NO", s.restoreClipExpected ? "YES" : "NO",
-        s.clipActive ? "YES" : "NO", s.expectedClipLeft.load(), s.expectedClipTop.load(),
-        s.expectedClipRight.load(), s.expectedClipBottom.load());
+        s.clipActive ? "YES" : "NO", clipRestored ? "YES" : "NO",
+        expectedClip.left, expectedClip.top, expectedClip.right, expectedClip.bottom,
+        clip.left, clip.top, clip.right, clip.bottom);
     Logger::Instance().Write("SNAPSHOT", "LIKELY FAILURE AREA: %s", FailureAreaName(failure));
 }
 
