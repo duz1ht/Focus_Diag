@@ -1,6 +1,6 @@
-# Focus Diagnostic DLL
+# Focus Diagnostic — proxy dinput8.dll
 
-DLL x86 de diagnóstico passivo para jogos DirectX 8. Ela registra o ciclo de
+Proxy DLL x86 de diagnóstico passivo para jogos DirectX 8. Ela registra o ciclo de
 perda e recuperação de foco sem forçar `SetFocus`, `Reset`, `Acquire` ou estado
 do cursor.
 
@@ -12,19 +12,19 @@ do cursor.
 3. Selecione **Release** e **x86**. Não use x64 para um jogo de 32 bits.
 4. Use **Build > Build Solution**.
 
-O resultado será criado em `bin\Release\FocusDiagnostic.dll`. O projeto inclui
+O resultado será criado em `bin\Release\dinput8.dll`. O projeto inclui
 as declarações mínimas da ABI do DirectX 8, portanto não requer a instalação do
 antigo DirectX SDK nem bibliotecas externas de hooking.
 
-## Carregar no jogo
+## Instalar no jogo
 
-Copiar a DLL para a pasta do jogo não a carrega automaticamente. Use o mesmo
-método de injeção/carregamento de DLL já adotado para o jogo e carregue a DLL
-cedo, antes da criação dos objetos Direct3D e DirectInput. O carregador precisa
-ter a mesma arquitetura do processo (x86).
+Copie `bin\Release\dinput8.dll` para a mesma pasta do executável do jogo. Quando
+o jogo importar `DirectInput8Create`, o Windows carregará automaticamente a
+proxy, que encaminhará as chamadas para a `dinput8.dll` original do diretório do
+sistema. Não é necessário usar um injetor. O jogo precisa ser x86.
 
-> Faça testes apenas em uma cópia local/offline do jogo. Injetores e DLLs podem
-> ser sinalizados por sistemas anticheat. Este projeto não inclui um injetor.
+> Faça testes apenas em uma cópia local/offline do jogo. DLLs proxy podem ser
+> sinalizadas por sistemas anticheat.
 
 Quando carregada, a DLL cria `FocusDiagnostic.log` ao lado dela. Se o processo
 não tiver permissão de escrita nessa pasta, execute a partir de uma pasta
@@ -52,8 +52,10 @@ Categorias possíveis incluem `WINDOW_ACTIVATION`, `D3D_DEVICE_LOST`,
 
 ## Como os hooks funcionam
 
-- As funções Win32 e as fábricas `Direct3DCreate8`/`DirectInput8Create` são
-  interceptadas na IAT do executável principal.
+- A proxy exporta as cinco entradas convencionais de `dinput8.dll`, carrega a
+  biblioteca verdadeira diretamente do diretório do sistema e encaminha as chamadas.
+- As funções Win32 e a fábrica `Direct3DCreate8` são interceptadas na IAT do
+  executável principal; `DirectInput8Create` é capturada diretamente pela proxy.
 - Os objetos COM capturados recebem uma cópia de sua vtable com somente os
   métodos observados substituídos.
 - Os eventos são enfileirados e uma thread separada grava o arquivo para reduzir
@@ -62,9 +64,11 @@ Categorias possíveis incluem `WINDOW_ACTIVATION`, `D3D_DEVICE_LOST`,
 
 ## Limitações da versão 0.1
 
-- A DLL deve ser carregada antes de `Direct3DCreate8` e `DirectInput8Create`.
-- APIs resolvidas exclusivamente por `GetProcAddress`, chamadas por módulos
-  auxiliares ou objetos criados antes do carregamento não são interceptados.
+- O executável precisa importar `dinput8.dll`; confirme com `dumpbin /imports`.
+- Se já existir uma `dinput8.dll` na pasta do jogo, não a sobrescreva sem antes
+  identificar se ela pertence a outro mod ou wrapper.
+- APIs de D3D/cursor resolvidas exclusivamente por `GetProcAddress` ou chamadas
+  por módulos auxiliares não são interceptadas.
 - Esta versão acompanha um objeto Direct3D e um dispositivo de cada tipo
   (mouse/teclado), que é o padrão esperado para o jogo alvo.
 - O resultado `INCONCLUSIVE` significa que os eventos observados não bastam para

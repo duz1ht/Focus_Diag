@@ -20,7 +20,6 @@ using SetCursorPosFn = BOOL(WINAPI*)(int, int);
 ClipCursorFn g_clipCursor{};
 SetCursorPosFn g_setCursorPos{};
 Direct3DCreate8Fn g_direct3DCreate8{};
-DirectInput8CreateFn g_directInput8Create{};
 struct ImportPatch { void** slot; void* original; void* replacement; };
 std::array<ImportPatch, 4> g_importPatches{};
 size_t g_importPatchCount{};
@@ -255,19 +254,6 @@ HRESULT WINAPI HookDInputCreateDevice(void* self, REFGUID guid, IDirectInputDevi
     return result;
 }
 
-HRESULT WINAPI HookDirectInput8Create(HINSTANCE instance, DWORD version, REFIID iid,
-                                      LPVOID* output, LPUNKNOWN outer) {
-    const HRESULT result = g_directInput8Create(instance, version, iid, output, outer);
-    Logger::Instance().Write("DINPUT", "DirectInput8Create(version=0x%lX) -> 0x%08lX (%s), object=%p",
-                             version, result, HResultName(result), output ? *output : nullptr);
-    if (SUCCEEDED(result) && output && *output) {
-        g_dinputObject = reinterpret_cast<void**>(*output);
-        ReplaceVtable<11>(*output, &g_dinputOriginalVtable, &g_dinputHookVtable, 3,
-                          reinterpret_cast<void*>(HookDInputCreateDevice));
-    }
-    return result;
-}
-
 LRESULT CALLBACK HookWndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
         case WM_ACTIVATE:
@@ -319,8 +305,6 @@ bool InstallHooks(HMODULE self) {
                 reinterpret_cast<void**>(&g_setCursorPos));
     const bool d3d = PatchImport(executable, "d3d8.dll", "Direct3DCreate8",
         reinterpret_cast<void*>(HookDirect3DCreate8), reinterpret_cast<void**>(&g_direct3DCreate8));
-    const bool input = PatchImport(executable, "dinput8.dll", "DirectInput8Create",
-        reinterpret_cast<void*>(HookDirectInput8Create), reinterpret_cast<void**>(&g_directInput8Create));
     for (unsigned attempt = 0; attempt < 300 && !g_window; ++attempt) {
         EnumWindows(FindWindowCallback, reinterpret_cast<LPARAM>(&g_window));
         if (!g_window) Sleep(100);
@@ -332,10 +316,19 @@ bool InstallHooks(HMODULE self) {
             g_window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(HookWndProc)));
         if (g_originalWndProc) SetTimer(g_window, kDiagnosticTimer, 1000, nullptr);
     }
-    Logger::Instance().Write("DIAGNOSTIC", "Hooks installed: window=%s d3d8=%s dinput8=%s cursor=%s",
-        g_originalWndProc ? "YES" : "NO", d3d ? "YES" : "NO", input ? "YES" : "NO",
+    Logger::Instance().Write("DIAGNOSTIC", "Hooks installed: window=%s d3d8=%s dinput8=PROXY cursor=%s",
+        g_originalWndProc ? "YES" : "NO", d3d ? "YES" : "NO",
         (g_clipCursor || g_setCursorPos) ? "YES" : "NO");
-    return g_originalWndProc || d3d || input;
+    return g_originalWndProc || d3d;
+}
+
+void TrackDirectInputObject(IDirectInput8A* object) {
+    if (!object) return;
+    g_dinputObject = reinterpret_cast<void**>(object);
+    if (ReplaceVtable<11>(object, &g_dinputOriginalVtable, &g_dinputHookVtable, 3,
+                          reinterpret_cast<void*>(HookDInputCreateDevice))) {
+        Logger::Instance().Write("DINPUT", "IDirectInput8 object captured through dinput8 proxy: %p", object);
+    }
 }
 
 void RemoveHooks() {

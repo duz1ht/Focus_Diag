@@ -24,9 +24,20 @@ bool Logger::Start(HMODULE module) {
     QueryPerformanceFrequency(&frequency_);
     QueryPerformanceCounter(&started_);
     event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    if (!event_) return false;
+    if (!event_) {
+        CloseHandle(file_);
+        file_ = INVALID_HANDLE_VALUE;
+        return false;
+    }
     thread_ = CreateThread(nullptr, 0, ThreadProc, this, 0, nullptr);
-    if (!thread_) return false;
+    if (!thread_) {
+        CloseHandle(event_);
+        event_ = nullptr;
+        CloseHandle(file_);
+        file_ = INVALID_HANDLE_VALUE;
+        return false;
+    }
+    started_.store(true, std::memory_order_release);
     Write("DIAGNOSTIC", "Focus Diagnostic 0.1 started; PID=%lu; architecture=x86",
           GetCurrentProcessId());
     return true;
@@ -49,6 +60,7 @@ void Logger::Stop() {
     FlushFileBuffers(file_);
     CloseHandle(file_);
     file_ = INVALID_HANDLE_VALUE;
+    started_.store(false, std::memory_order_release);
 }
 
 std::string Logger::Prefix(const char* category) const {
@@ -70,7 +82,7 @@ void Logger::Write(const char* category, const char* format, ...) {
 }
 
 void Logger::WriteV(const char* category, const char* format, va_list args) {
-    if (file_ == INVALID_HANDLE_VALUE || stopping_) return;
+    if (!started_.load(std::memory_order_acquire) || stopping_) return;
     char body[2048]{};
     vsprintf_s(body, format, args);
     std::string line = Prefix(category) + body + "\r\n";
