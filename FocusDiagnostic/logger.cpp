@@ -8,8 +8,12 @@
 namespace fd {
 
 Logger& Logger::Instance() {
-    static Logger logger;
-    return logger;
+    // Intentionally process-lifetime. A proxy DLL can still have worker threads
+    // running while the CRT performs static destruction during process exit.
+    // Leaking this singleton lets Windows tear it down with the process instead
+    // of destroying its mutex/queue underneath the logging thread.
+    static Logger* logger = new Logger();
+    return *logger;
 }
 
 bool Logger::Start(HMODULE module) {

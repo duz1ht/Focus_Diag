@@ -96,6 +96,49 @@ bool ReplaceVtable(void* object, void*** savedOriginal, void*** savedHook,
     return true;
 }
 
+template <size_t Count>
+bool PatchVtableInPlace(void* object, void*** savedOriginal, void*** savedPatched,
+                        size_t index, void* replacement) {
+    if (!object) return false;
+    void** vtable = *reinterpret_cast<void***>(object);
+    if (*savedPatched) return *savedPatched == vtable;
+    void** backup = static_cast<void**>(VirtualAlloc(nullptr, Count * sizeof(void*),
+                                                      MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    if (!backup) return false;
+    memcpy(backup, vtable, Count * sizeof(void*));
+    DWORD oldProtect{};
+    if (!VirtualProtect(&vtable[index], sizeof(void*), PAGE_EXECUTE_READWRITE, &oldProtect)) {
+        VirtualFree(backup, 0, MEM_RELEASE);
+        return false;
+    }
+    vtable[index] = replacement;
+    VirtualProtect(&vtable[index], sizeof(void*), oldProtect, &oldProtect);
+    FlushInstructionCache(GetCurrentProcess(), &vtable[index], sizeof(void*));
+    *savedOriginal = backup;
+    *savedPatched = vtable;
+    return true;
+}
+
+bool PatchExistingVtableSlot(void** vtable, size_t index, void* replacement) {
+    if (!vtable) return false;
+    DWORD oldProtect{};
+    if (!VirtualProtect(&vtable[index], sizeof(void*), PAGE_EXECUTE_READWRITE, &oldProtect))
+        return false;
+    vtable[index] = replacement;
+    VirtualProtect(&vtable[index], sizeof(void*), oldProtect, &oldProtect);
+    FlushInstructionCache(GetCurrentProcess(), &vtable[index], sizeof(void*));
+    return true;
+}
+
+void RestoreVtableInPlace(void**& backup, void**& patched, const size_t* indices, size_t count) {
+    if (!backup || !patched) return;
+    for (size_t item = 0; item < count; ++item)
+        PatchExistingVtableSlot(patched, indices[item], backup[indices[item]]);
+    VirtualFree(backup, 0, MEM_RELEASE);
+    backup = nullptr;
+    patched = nullptr;
+}
+
 void RestoreVtable(void** object, void** original, void**& hook) {
     if (object && original && hook) {
         auto slot = reinterpret_cast<void***>(object);
@@ -228,13 +271,21 @@ HRESULT WINAPI HookCreateDevice(void* self, UINT adapter, D3DDEVTYPE type, HWND 
                              adapter, focusWindow, result, HResultName(result), device ? *device : nullptr);
     if (SUCCEEDED(result) && device && *device) {
         g_d3dDeviceObject = reinterpret_cast<void**>(*device);
-        if (g_enableD3DDevice.load(std::memory_order_acquire) &&
-            ReplaceVtable<97>(*device, &g_d3dDeviceOriginalVtable, &g_d3dDeviceHookVtable,
-                              3, reinterpret_cast<void*>(HookTestCooperativeLevel))) {
-            g_d3dDeviceHookVtable[14] = reinterpret_cast<void*>(HookReset);
-            g_d3dDeviceHookVtable[15] = reinterpret_cast<void*>(HookPresent);
-            State().d3dObserved = true;
-            Logger::Instance().Write("D3D8", "Device method hooks installed");
+        if (g_enableD3DDevice.load(std::memory_order_acquire)) {
+            const bool installed =
+                PatchVtableInPlace<97>(*device, &g_d3dDeviceOriginalVtable, &g_d3dDeviceHookVtable,
+                                       3, reinterpret_cast<void*>(HookTestCooperativeLevel)) &&
+                PatchExistingVtableSlot(g_d3dDeviceHookVtable, 14, reinterpret_cast<void*>(HookReset)) &&
+                PatchExistingVtableSlot(g_d3dDeviceHookVtable, 15, reinterpret_cast<void*>(HookPresent));
+            if (installed) {
+                State().d3dObserved = true;
+                Logger::Instance().Write("D3D8", "Device method hooks installed in shared vtable");
+            } else {
+                constexpr size_t indices[] = {3, 14, 15};
+                RestoreVtableInPlace(g_d3dDeviceOriginalVtable, g_d3dDeviceHookVtable,
+                                     indices, _countof(indices));
+                Logger::Instance().Write("D3D8", "Device method hook installation failed; changes rolled back");
+            }
         }
         if (focusWindow) State().gameWindow = focusWindow;
     }
@@ -246,8 +297,11 @@ IDirect3D8* WINAPI HookDirect3DCreate8(UINT sdkVersion) {
     Logger::Instance().Write("D3D8", "Direct3DCreate8(%u) -> %p", sdkVersion, result);
     if (result && g_enableD3DCreateDevice.load(std::memory_order_acquire)) {
         g_d3d8Object = reinterpret_cast<void**>(result);
-        ReplaceVtable<15>(result, &g_d3d8OriginalVtable, &g_d3d8HookVtable,
-                          14, reinterpret_cast<void*>(HookCreateDevice));
+        const bool installed = PatchVtableInPlace<15>(
+            result, &g_d3d8OriginalVtable, &g_d3d8HookVtable,
+            14, reinterpret_cast<void*>(HookCreateDevice));
+        Logger::Instance().Write("D3D8", "CreateDevice hook in shared vtable -> %s",
+                                 installed ? "OK" : "FAILED");
     }
     return result;
 }
@@ -402,8 +456,12 @@ void RemoveHooks() {
     RestoreVtable(g_keyboardObject, g_keyboardOriginalVtable, g_keyboardHookVtable);
     RestoreVtable(g_mouseObject, g_mouseOriginalVtable, g_mouseHookVtable);
     RestoreVtable(g_dinputObject, g_dinputOriginalVtable, g_dinputHookVtable);
-    RestoreVtable(g_d3dDeviceObject, g_d3dDeviceOriginalVtable, g_d3dDeviceHookVtable);
-    RestoreVtable(g_d3d8Object, g_d3d8OriginalVtable, g_d3d8HookVtable);
+    constexpr size_t deviceIndices[] = {3, 14, 15};
+    constexpr size_t d3d8Indices[] = {14};
+    RestoreVtableInPlace(g_d3dDeviceOriginalVtable, g_d3dDeviceHookVtable,
+                         deviceIndices, _countof(deviceIndices));
+    RestoreVtableInPlace(g_d3d8OriginalVtable, g_d3d8HookVtable,
+                         d3d8Indices, _countof(d3d8Indices));
     while (g_importPatchCount) {
         const ImportPatch patch = g_importPatches[--g_importPatchCount];
         if (!patch.slot || *patch.slot != patch.replacement) continue;

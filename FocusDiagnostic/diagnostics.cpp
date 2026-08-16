@@ -109,6 +109,14 @@ void CheckRecoveryTimeout() {
     auto& s = State();
     const ULONGLONG returned = s.focusReturnedAt;
     if (s.recovering && returned && GetTickCount64() - returned >= 5000) {
+        if (!s.d3dObserved) {
+            Logger::Instance().Write("RECOVERY",
+                "Attempt %lu PARTIAL; window recovered; D3D device methods not monitored",
+                s.attempt.load());
+            WriteSnapshot("WINDOW RECOVERED - D3D NOT MONITORED");
+            s.recovering = false;
+            return;
+        }
         const FailureArea failure = Diagnose();
         Logger::Instance().Write("RECOVERY", "Attempt %lu FAILURE; first divergence=%s",
                                  s.attempt.load(), FailureAreaName(failure));

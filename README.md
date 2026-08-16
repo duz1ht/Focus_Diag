@@ -60,6 +60,11 @@ guarde o último `FocusDiagnostic.log`; isso identifica o hook incompatível.
 `D3D8Device=1` habilita `TestCooperativeLevel`, `Reset` e `Present`. Não ative
 uma etapa posterior sem manter as anteriores habilitadas.
 
+Os hooks D3D usam patch dos slots da vtable compartilhada em vez de substituir
+o ponteiro de vtable dentro do objeto COM. Essa abordagem mantém a identidade e
+o layout do objeto retornado pelo runtime antigo. Se qualquer slot não puder ser
+instalado, as mudanças parciais são revertidas.
+
 Com `Window=1`, o procedimento de foco é:
 
 1. Entre no gameplay e pressione **F10** para gravar `USER MARKER`.
@@ -86,8 +91,9 @@ Categorias possíveis incluem `WINDOW_ACTIVATION`, `D3D_DEVICE_LOST`,
   biblioteca verdadeira diretamente do diretório do sistema e encaminha as chamadas.
 - As funções Win32 e a fábrica `Direct3DCreate8` são interceptadas na IAT do
   executável principal; `DirectInput8Create` é capturada diretamente pela proxy.
-- Os objetos COM capturados recebem uma cópia de sua vtable com somente os
-  métodos observados substituídos.
+- Os objetos DirectInput capturados recebem uma cópia instrumentada de sua
+  vtable; para Direct3D, somente os slots necessários da vtable compartilhada
+  são temporariamente substituídos.
 - Os eventos são enfileirados e uma thread separada grava o arquivo para reduzir
   interferência no timing do jogo.
 - A inicialização aguarda por até 30 segundos pela janela principal do processo.
@@ -107,3 +113,5 @@ Categorias possíveis incluem `WINDOW_ACTIVATION`, `D3D_DEVICE_LOST`,
 - Quando `D3D8Device=0`, o contador de frames permanece zero por falta de
   instrumentação. Nesse modo o diagnóstico não classifica mais a ausência de
   `Present` como `RENDER_LOOP`.
+- Em uma recuperação com monitoramento D3D desligado, o timeout é registrado
+  como `PARTIAL`/`D3D NOT MONITORED`, e não como falha do render loop.
