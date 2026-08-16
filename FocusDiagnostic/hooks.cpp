@@ -6,6 +6,7 @@
 
 #include <array>
 #include <atomic>
+#include <climits>
 #include <cstring>
 
 namespace fd {
@@ -42,11 +43,19 @@ void** g_keyboardOriginalVtable{};
 void** g_keyboardHookVtable{};
 
 thread_local bool g_insideHook = false;
+thread_local int g_lastCursorX = INT_MIN;
+thread_local int g_lastCursorY = INT_MIN;
+thread_local ULONGLONG g_lastCursorLogAt = 0;
+thread_local unsigned g_suppressedCursorCalls = 0;
 std::atomic<bool> g_enableDirectInput{false};
+std::atomic<bool> g_enableD3DCreateDevice{false};
+std::atomic<bool> g_enableD3DDevice{false};
 
 struct HookSettings {
     bool window = false;
     bool d3d8 = false;
+    bool d3d8CreateDevice = false;
+    bool d3d8Device = false;
     bool directInput = false;
     bool cursor = false;
 };
@@ -60,6 +69,8 @@ HookSettings LoadHookSettings(HMODULE module) {
     HookSettings settings;
     settings.window = GetPrivateProfileIntW(L"Hooks", L"Window", 0, path) != 0;
     settings.d3d8 = GetPrivateProfileIntW(L"Hooks", L"D3D8", 0, path) != 0;
+    settings.d3d8CreateDevice = GetPrivateProfileIntW(L"Hooks", L"D3D8CreateDevice", 0, path) != 0;
+    settings.d3d8Device = GetPrivateProfileIntW(L"Hooks", L"D3D8Device", 0, path) != 0;
     settings.directInput = GetPrivateProfileIntW(L"Hooks", L"DirectInput", 0, path) != 0;
     settings.cursor = GetPrivateProfileIntW(L"Hooks", L"Cursor", 0, path) != 0;
     return settings;
@@ -150,7 +161,20 @@ BOOL WINAPI HookClipCursor(const RECT* rect) {
 BOOL WINAPI HookSetCursorPos(int x, int y) {
     if (g_insideHook) return g_setCursorPos(x, y);
     g_insideHook = true;
-    Logger::Instance().Write("CURSOR", "SetCursorPos(%d,%d)", x, y);
+    const ULONGLONG now = GetTickCount64();
+    const bool repeated = x == g_lastCursorX && y == g_lastCursorY;
+    if (repeated && now - g_lastCursorLogAt < 1000) {
+        ++g_suppressedCursorCalls;
+    } else {
+        if (g_suppressedCursorCalls)
+            Logger::Instance().Write("CURSOR", "%u repeated SetCursorPos(%d,%d) calls suppressed",
+                                     g_suppressedCursorCalls, g_lastCursorX, g_lastCursorY);
+        Logger::Instance().Write("CURSOR", "SetCursorPos(%d,%d)", x, y);
+        g_lastCursorX = x;
+        g_lastCursorY = y;
+        g_lastCursorLogAt = now;
+        g_suppressedCursorCalls = 0;
+    }
     const BOOL result = g_setCursorPos(x, y);
     g_insideHook = false;
     return result;
@@ -204,10 +228,14 @@ HRESULT WINAPI HookCreateDevice(void* self, UINT adapter, D3DDEVTYPE type, HWND 
                              adapter, focusWindow, result, HResultName(result), device ? *device : nullptr);
     if (SUCCEEDED(result) && device && *device) {
         g_d3dDeviceObject = reinterpret_cast<void**>(*device);
-        ReplaceVtable<97>(*device, &g_d3dDeviceOriginalVtable, &g_d3dDeviceHookVtable,
-                          3, reinterpret_cast<void*>(HookTestCooperativeLevel));
-        g_d3dDeviceHookVtable[14] = reinterpret_cast<void*>(HookReset);
-        g_d3dDeviceHookVtable[15] = reinterpret_cast<void*>(HookPresent);
+        if (g_enableD3DDevice.load(std::memory_order_acquire) &&
+            ReplaceVtable<97>(*device, &g_d3dDeviceOriginalVtable, &g_d3dDeviceHookVtable,
+                              3, reinterpret_cast<void*>(HookTestCooperativeLevel))) {
+            g_d3dDeviceHookVtable[14] = reinterpret_cast<void*>(HookReset);
+            g_d3dDeviceHookVtable[15] = reinterpret_cast<void*>(HookPresent);
+            State().d3dObserved = true;
+            Logger::Instance().Write("D3D8", "Device method hooks installed");
+        }
         if (focusWindow) State().gameWindow = focusWindow;
     }
     return result;
@@ -216,7 +244,7 @@ HRESULT WINAPI HookCreateDevice(void* self, UINT adapter, D3DDEVTYPE type, HWND 
 IDirect3D8* WINAPI HookDirect3DCreate8(UINT sdkVersion) {
     IDirect3D8* result = g_direct3DCreate8(sdkVersion);
     Logger::Instance().Write("D3D8", "Direct3DCreate8(%u) -> %p", sdkVersion, result);
-    if (result) {
+    if (result && g_enableD3DCreateDevice.load(std::memory_order_acquire)) {
         g_d3d8Object = reinterpret_cast<void**>(result);
         ReplaceVtable<15>(result, &g_d3d8OriginalVtable, &g_d3d8HookVtable,
                           14, reinterpret_cast<void*>(HookCreateDevice));
@@ -265,14 +293,14 @@ HRESULT WINAPI HookDInputCreateDevice(void* self, REFGUID guid, IDirectInputDevi
         mouse ? "MOUSE" : keyboard ? "KEYBOARD" : "OTHER", result, HResultName(result), device ? *device : nullptr);
     if (SUCCEEDED(result) && device && *device && mouse) {
         g_mouseObject = reinterpret_cast<void**>(*device);
-        ReplaceVtable<32>(*device, &g_mouseOriginalVtable, &g_mouseHookVtable, 7,
-                          reinterpret_cast<void*>(HookMouseAcquire));
-        g_mouseHookVtable[8] = reinterpret_cast<void*>(HookMouseUnacquire);
+        if (ReplaceVtable<32>(*device, &g_mouseOriginalVtable, &g_mouseHookVtable, 7,
+                             reinterpret_cast<void*>(HookMouseAcquire)))
+            g_mouseHookVtable[8] = reinterpret_cast<void*>(HookMouseUnacquire);
     } else if (SUCCEEDED(result) && device && *device && keyboard) {
         g_keyboardObject = reinterpret_cast<void**>(*device);
-        ReplaceVtable<32>(*device, &g_keyboardOriginalVtable, &g_keyboardHookVtable, 7,
-                          reinterpret_cast<void*>(HookKeyboardAcquire));
-        g_keyboardHookVtable[8] = reinterpret_cast<void*>(HookKeyboardUnacquire);
+        if (ReplaceVtable<32>(*device, &g_keyboardOriginalVtable, &g_keyboardHookVtable, 7,
+                             reinterpret_cast<void*>(HookKeyboardAcquire)))
+            g_keyboardHookVtable[8] = reinterpret_cast<void*>(HookKeyboardUnacquire);
     }
     return result;
 }
@@ -322,7 +350,11 @@ BOOL CALLBACK FindWindowCallback(HWND window, LPARAM output) {
 bool InstallHooks(HMODULE self) {
     g_self = self;
     const HookSettings settings = LoadHookSettings(self);
+    const bool enableD3DCreateDevice = settings.d3d8 && settings.d3d8CreateDevice;
+    const bool enableD3DDevice = enableD3DCreateDevice && settings.d3d8Device;
     g_enableDirectInput.store(settings.directInput, std::memory_order_release);
+    g_enableD3DCreateDevice.store(enableD3DCreateDevice, std::memory_order_release);
+    g_enableD3DDevice.store(enableD3DDevice, std::memory_order_release);
     HMODULE executable = GetModuleHandleW(nullptr);
     if (settings.cursor) {
         PatchImport(executable, "USER32.dll", "ClipCursor", reinterpret_cast<void*>(HookClipCursor),
@@ -345,8 +377,9 @@ bool InstallHooks(HMODULE self) {
             if (g_originalWndProc) SetTimer(g_window, kDiagnosticTimer, 1000, nullptr);
         }
     }
-    Logger::Instance().Write("DIAGNOSTIC", "Hook mode: window=%s d3d8=%s dinput8=%s cursor=%s",
+    Logger::Instance().Write("DIAGNOSTIC", "Hook mode: window=%s d3d8=%s create-device=%s device-methods=%s dinput8=%s cursor=%s",
         g_originalWndProc ? "YES" : "NO", d3d ? "YES" : "NO",
+        enableD3DCreateDevice ? "YES" : "NO", enableD3DDevice ? "YES" : "NO",
         settings.directInput ? "YES" : "PROXY-ONLY",
         (g_clipCursor || g_setCursorPos) ? "YES" : "NO");
     return true;

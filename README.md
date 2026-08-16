@@ -44,13 +44,21 @@ Depois, feche o jogo e habilite apenas um subsistema por vez em
 [Hooks]
 Window=1
 D3D8=0
+D3D8CreateDevice=0
+D3D8Device=0
 DirectInput=0
 Cursor=0
 ```
 
-Teste novamente, depois habilite `DirectInput`, depois `D3D8` e por último
-`Cursor`. Se o jogo voltar a fechar ao habilitar uma opção, deixe-a em `0` e
+Teste novamente, depois habilite `DirectInput` e `Cursor`. Para Direct3D, use
+três etapas separadas: primeiro `D3D8=1`, depois `D3D8CreateDevice=1` e somente
+por último `D3D8Device=1`. Se o jogo voltar a fechar ao habilitar uma opção, deixe-a em `0` e
 guarde o último `FocusDiagnostic.log`; isso identifica o hook incompatível.
+
+`D3D8=1` intercepta apenas a função de fábrica e não altera objetos COM.
+`D3D8CreateDevice=1` adiciona a observação de `IDirect3D8::CreateDevice`.
+`D3D8Device=1` habilita `TestCooperativeLevel`, `Reset` e `Present`. Não ative
+uma etapa posterior sem manter as anteriores habilitadas.
 
 Com `Window=1`, o procedimento de foco é:
 
@@ -96,3 +104,6 @@ Categorias possíveis incluem `WINDOW_ACTIVATION`, `D3D_DEVICE_LOST`,
 - O resultado `INCONCLUSIVE` significa que os eventos observados não bastam para
   atribuir a falha com segurança; ele não deve ser tratado como confirmação de
   que todos os subsistemas estão corretos.
+- Quando `D3D8Device=0`, o contador de frames permanece zero por falta de
+  instrumentação. Nesse modo o diagnóstico não classifica mais a ausência de
+  `Present` como `RENDER_LOOP`.

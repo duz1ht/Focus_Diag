@@ -58,8 +58,8 @@ static FailureArea Diagnose() {
     HWND game = s.gameWindow;
     if (!game || (GetForegroundWindow() != game && GetFocus() != game))
         return FailureArea::WindowActivation;
-    if (s.cooperativeLevel == kD3DErrDeviceLost) return FailureArea::D3DDeviceLost;
-    if (FAILED(s.lastReset)) return FailureArea::D3DReset;
+    if (s.d3dObserved && s.cooperativeLevel == kD3DErrDeviceLost) return FailureArea::D3DDeviceLost;
+    if (s.d3dObserved && FAILED(s.lastReset)) return FailureArea::D3DReset;
     if (FAILED(s.keyboardAcquire)) return FailureArea::KeyboardAcquire;
     if (FAILED(s.mouseAcquire)) return FailureArea::MouseAcquire;
     RECT client{}, clip{};
@@ -68,7 +68,8 @@ static FailureArea Diagnose() {
         if (ClientToScreen(game, &center) && !PtInRect(&clip, center))
             return FailureArea::CursorState;
     }
-    if (s.focusReturnedAt && s.lastPresentAt < s.focusReturnedAt) return FailureArea::RenderLoop;
+    if (s.d3dObserved && s.focusReturnedAt && s.lastPresentAt < s.focusReturnedAt)
+        return FailureArea::RenderLoop;
     return FailureArea::Inconclusive;
 }
 
@@ -97,6 +98,8 @@ void WriteSnapshot(const char* reason) {
     const HRESULT mouse = s.mouseAcquire.load();
     Logger::Instance().Write("SNAPSHOT", "cooperative=0x%08lX (%s) reset=0x%08lX (%s)",
         cooperative, HResultName(cooperative), reset, HResultName(reset));
+    Logger::Instance().Write("SNAPSHOT", "d3d monitoring=%s",
+                             s.d3dObserved ? "ACTIVE" : "NOT ACTIVE");
     Logger::Instance().Write("SNAPSHOT", "keyboard=0x%08lX (%s) mouse=0x%08lX (%s)",
         keyboard, HResultName(keyboard), mouse, HResultName(mouse));
     Logger::Instance().Write("SNAPSHOT", "LIKELY FAILURE AREA: %s", FailureAreaName(failure));

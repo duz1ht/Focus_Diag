@@ -15,6 +15,7 @@ struct DiagnosticState {
     std::atomic<bool> recovering{false};
     std::atomic<unsigned long> attempt{0};
     std::atomic<unsigned long long> frames{0};
+    std::atomic<bool> d3dObserved{false};
     std::atomic<HRESULT> cooperativeLevel{S_OK};
     std::atomic<HRESULT> lastReset{S_OK};
     std::atomic<HRESULT> mouseAcquire{S_OK};
