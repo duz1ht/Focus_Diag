@@ -1,5 +1,7 @@
 #include "hooks.h"
 
+#include <windows.h>
+
 #include <array>
 #include <atomic>
 #include <cstring>
