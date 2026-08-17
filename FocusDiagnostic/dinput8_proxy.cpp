@@ -1,10 +1,8 @@
 #include <windows.h>
 
-#include "hooks.h"
-#include "legacy_dx8.h"
-#include "logger.h"
-
 namespace {
+
+using DirectInput8CreateFn = HRESULT(WINAPI*)(HINSTANCE, DWORD, REFIID, LPVOID*, LPUNKNOWN);
 
 INIT_ONCE g_realModuleOnce = INIT_ONCE_STATIC_INIT;
 HMODULE g_realModule{};
@@ -16,8 +14,6 @@ BOOL CALLBACK LoadRealModule(PINIT_ONCE, PVOID, PVOID*) {
     if (path[length - 1] != L'\\') wcscat_s(path, L"\\");
     wcscat_s(path, L"dinput8.dll");
     g_realModule = LoadLibraryW(path);
-    if (g_realModule)
-        fd::Logger::Instance().Write("PROXY", "Loaded real DirectInput library: %ls", path);
     return g_realModule != nullptr;
 }
 
@@ -32,12 +28,7 @@ extern "C" HRESULT WINAPI DirectInput8Create(HINSTANCE instance, DWORD version, 
                                                LPVOID* output, LPUNKNOWN outer) {
     const auto real = reinterpret_cast<DirectInput8CreateFn>(RealExport("DirectInput8Create"));
     if (!real) return HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND);
-    const HRESULT result = real(instance, version, iid, output, outer);
-    fd::Logger::Instance().Write("PROXY", "DirectInput8Create(version=0x%lX) -> 0x%08lX (%s), object=%p",
-                                 version, result, fd::HResultName(result), output ? *output : nullptr);
-    if (SUCCEEDED(result) && output && *output)
-        fd::TrackDirectInputObject(static_cast<IDirectInput8A*>(*output));
-    return result;
+    return real(instance, version, iid, output, outer);
 }
 
 extern "C" HRESULT WINAPI DllCanUnloadNow() {
