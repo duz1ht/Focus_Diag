@@ -20,11 +20,15 @@ constexpr UINT_PTR kCursorRecoveryTimer = 0xF0C06;
 
 using ClipCursorFn = BOOL(WINAPI*)(const RECT*);
 using SetCursorPosFn = BOOL(WINAPI*)(int, int);
+using ShowCursorFn = int(WINAPI*)(BOOL);
+using SetCursorFn = HCURSOR(WINAPI*)(HCURSOR);
 ClipCursorFn g_clipCursor{};
 SetCursorPosFn g_setCursorPos{};
+ShowCursorFn g_showCursor{};
+SetCursorFn g_setCursor{};
 Direct3DCreate8Fn g_direct3DCreate8{};
 struct ImportPatch { void** slot; void* original; void* replacement; };
-std::array<ImportPatch, 4> g_importPatches{};
+std::array<ImportPatch, 6> g_importPatches{};
 size_t g_importPatchCount{};
 
 void** g_dinputObject{};
@@ -190,6 +194,24 @@ BOOL WINAPI HookSetCursorPos(int x, int y) {
     return result;
 }
 
+int WINAPI HookShowCursor(BOOL show) {
+    const int result = g_showCursor(show);
+    State().cursorVisibilityObserved = true;
+    State().showCursorObserved = true;
+    State().lastShowCursorResult = result;
+    Logger::Instance().Write("CURSOR/VISIBILITY", "ShowCursor(%s) -> %d",
+                             show ? "TRUE" : "FALSE", result);
+    return result;
+}
+
+HCURSOR WINAPI HookSetCursor(HCURSOR cursor) {
+    const HCURSOR previous = g_setCursor(cursor);
+    State().cursorVisibilityObserved = true;
+    Logger::Instance().Write("CURSOR/VISIBILITY", "SetCursor(%p) -> previous=%p",
+                             cursor, previous);
+    return previous;
+}
+
 IDirect3D8* WINAPI HookDirect3DCreate8(UINT sdkVersion) {
     IDirect3D8* result = g_direct3DCreate8(sdkVersion);
     Logger::Instance().Write("D3D8", "Direct3DCreate8(%u) -> %p", sdkVersion, result);
@@ -324,6 +346,16 @@ void ApplyCursorRecovery() {
 }
 
 LRESULT CALLBACK HookWndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    if (message == WM_SETCURSOR) {
+        CheckRecoveryTimeout();
+        const LRESULT result = CallWindowProcW(g_originalWndProc, window, message, wParam, lParam);
+        State().cursorVisibilityObserved = true;
+        Logger::Instance().Write("CURSOR/VISIBILITY",
+            "WM_SETCURSOR hwnd=%p hit-test=%u mouse-message=%u -> %lld",
+            reinterpret_cast<HWND>(wParam), static_cast<unsigned>(LOWORD(lParam)),
+            static_cast<unsigned>(HIWORD(lParam)), static_cast<long long>(result));
+        return result;
+    }
     switch (message) {
         case WM_ACTIVATE:
             Logger::Instance().Write("WINDOW", "WM_ACTIVATE -> %u", LOWORD(wParam));
@@ -419,6 +451,10 @@ bool InstallHooks(HMODULE self) {
                     reinterpret_cast<void**>(&g_clipCursor));
         PatchImport(executable, "USER32.dll", "SetCursorPos", reinterpret_cast<void*>(HookSetCursorPos),
                     reinterpret_cast<void**>(&g_setCursorPos));
+        PatchImport(executable, "USER32.dll", "ShowCursor", reinterpret_cast<void*>(HookShowCursor),
+                    reinterpret_cast<void**>(&g_showCursor));
+        PatchImport(executable, "USER32.dll", "SetCursor", reinterpret_cast<void*>(HookSetCursor),
+                    reinterpret_cast<void**>(&g_setCursor));
     }
     const bool d3d = settings.d3d8 && PatchImport(executable, "d3d8.dll", "Direct3DCreate8",
         reinterpret_cast<void*>(HookDirect3DCreate8), reinterpret_cast<void**>(&g_direct3DCreate8));

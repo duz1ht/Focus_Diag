@@ -23,6 +23,9 @@ struct DiagnosticState {
     std::atomic<bool> mouseObserved{false};
     std::atomic<bool> keyboardObserved{false};
     std::atomic<bool> cursorObserved{false};
+    std::atomic<bool> cursorVisibilityObserved{false};
+    std::atomic<bool> showCursorObserved{false};
+    std::atomic<int> lastShowCursorResult{0};
     std::atomic<bool> clipActive{false};
     std::atomic<bool> restoreClipExpected{false};
     std::atomic<LONG> expectedClipLeft{0};

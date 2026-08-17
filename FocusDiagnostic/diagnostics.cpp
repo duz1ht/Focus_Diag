@@ -150,6 +150,11 @@ void WriteSnapshot(const char* reason) {
         s.clipActive ? "YES" : "NO", clipRestored ? "YES" : "NO",
         expectedClip.left, expectedClip.top, expectedClip.right, expectedClip.bottom,
         clip.left, clip.top, clip.right, clip.bottom);
+    const bool showCursorObserved = s.showCursorObserved.load();
+    Logger::Instance().Write("SNAPSHOT", "cursor visibility observed=%s ShowCursor observed=%s last result=%d (%s)",
+        s.cursorVisibilityObserved ? "YES" : "NO", showCursorObserved ? "YES" : "NO",
+        s.lastShowCursorResult.load(), !showCursorObserved ? "UNKNOWN" :
+        (s.lastShowCursorResult.load() >= 0 ? "VISIBLE" : "HIDDEN"));
     Logger::Instance().Write("SNAPSHOT", "LIKELY FAILURE AREA: %s", FailureAreaName(failure));
 }
 

@@ -75,7 +75,9 @@ O logger registra:
 - ativação, foco, redimensionamento e mudança de display da janela;
 - criação do objeto Direct3D 8 por `Direct3DCreate8`;
 - `Acquire` e `Unacquire` de mouse e teclado;
-- `ClipCursor` e `SetCursorPos` quando importados diretamente pelo executável;
+- `ClipCursor`, `SetCursorPos`, `ShowCursor` e `SetCursor` quando importados
+  diretamente pelo executável, além de mensagens `WM_SETCURSOR` observadas pelo
+  hook de janela;
 - HRESULTs legíveis e IDs das threads;
 - `LIKELY FAILURE AREA` no snapshot e um resumo após timeout de cinco segundos.
 
@@ -130,6 +132,13 @@ UseSetCapture=0
 ForceWindowActivation=0
 ForceDirectInputAcquire=0
 ```
+
+`RestoreCursorClip` restaura somente o confinamento imposto por `ClipCursor`; ele
+não altera a visibilidade nem a imagem do cursor. Com `Hooks.Cursor=1`, os hooks
+de `ShowCursor` e `SetCursor` são estritamente passivos: registram argumentos e
+resultados e sempre encaminham a chamada original sem modificações. Compare os
+timestamps dessas entradas e de `WM_SETCURSOR` antes do Alt-Tab, durante o retorno
+ao jogo e quando o cursor começar a piscar.
 
 Depois de `WM_SETFOCUS`/`WM_ACTIVATEAPP TRUE`, a DLL espera o modo de vídeo do
 jogo reaparecer e mais `RestoreCursorClipDelayMs`. Se o clipping real diferir do
