@@ -34,13 +34,14 @@
     <Link><SubSystem>Windows</SubSystem><EnableCOMDATFolding>true</EnableCOMDATFolding><OptimizeReferences>true</OptimizeReferences><GenerateDebugInformation>true</GenerateDebugInformation><ModuleDefinitionFile>dinput8_proxy.def</ModuleDefinitionFile></Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="dinput8_proxy.cpp" /><ClCompile Include="dllmain.cpp" /><ClCompile Include="hooks.cpp" />
+    <ClCompile Include="diagnostics.cpp" /><ClCompile Include="dinput8_proxy.cpp" /><ClCompile Include="dllmain.cpp" /><ClCompile Include="hooks.cpp" /><ClCompile Include="logger.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="dinput8_proxy.def" />
+    <None Include="FocusDiagnostic.ini"><CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory></None>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="hooks.h" />
+    <ClInclude Include="diagnostics.h" /><ClInclude Include="hooks.h" /><ClInclude Include="legacy_dx8.h" /><ClInclude Include="logger.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

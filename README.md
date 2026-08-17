@@ -1,33 +1,148 @@
-# Alt-Tab Cursor Clipping Recovery — proxy dinput8.dll
+# Focus Diagnostic — proxy dinput8.dll
 
-Proxy DLL x86 for the confirmed Alt-Tab cursor clipping fix. It contains only:
+Proxy DLL x86 de diagnóstico passivo para jogos DirectX 8. Ela registra o ciclo de
+perda e recuperação de foco sem forçar `SetFocus`, `Reset`, `Acquire` ou estado
+do cursor.
 
-- forwarding to the system `dinput8.dll`;
-- interception of the game's `ClipCursor` import;
-- window activation and display-change monitoring;
-- restoration of the last active cursor clip after fullscreen returns.
+## Compilar no Visual Studio 2022
 
-It does not hook Direct3D or DirectInput objects, force window focus, call `SetCapture`, or create diagnostic logs. The working behavior is built in: display-change waiting is enabled and the stabilization delay is 250 ms. No INI file is required.
+1. Instale a carga de trabalho **Desenvolvimento para desktop com C++** e o
+   Windows 10/11 SDK.
+2. Abra `FocusDiagnostic.sln`.
+3. Selecione **Release** e **x86**. Não use x64 para um jogo de 32 bits.
+4. Use **Build > Build Solution**.
 
-## Build
+O resultado será criado em `bin\Release\dinput8.dll`. O projeto inclui
+as declarações mínimas da ABI do DirectX 8, portanto não requer a instalação do
+antigo DirectX SDK nem bibliotecas externas de hooking.
 
-1. Install Visual Studio 2022 with **Desktop development with C++** and a Windows 10/11 SDK.
-2. Open `FocusDiagnostic.sln`.
-3. Select **Release** and **x86**.
-4. Build the solution.
+## Instalar no jogo
 
-The output is `bin\Release\dinput8.dll`.
+Copie `bin\Release\dinput8.dll` e `bin\Release\FocusDiagnostic.ini` para a mesma
+pasta do executável do jogo. Quando
+o jogo importar `DirectInput8Create`, o Windows carregará automaticamente a
+proxy, que encaminhará as chamadas para a `dinput8.dll` original do diretório do
+sistema. Não é necessário usar um injetor. O jogo precisa ser x86.
 
-## Install
+> Faça testes apenas em uma cópia local/offline do jogo. DLLs proxy podem ser
+> sinalizadas por sistemas anticheat.
 
-Place `dinput8.dll` next to the 32-bit game executable. The proxy loads the original `dinput8.dll` from the Windows system directory and forwards its five standard exports. Do not overwrite another mod's `dinput8.dll` without first checking compatibility.
+Quando carregada, a DLL cria `FocusDiagnostic.log` ao lado dela. Se o processo
+não tiver permissão de escrita nessa pasta, execute a partir de uma pasta
+gravável ou ajuste as permissões.
 
-## Recovery Flow
+## Procedimento de teste
 
-1. The `ClipCursor` hook records the last successful active rectangle requested by the game.
-2. The window hook detects focus loss and remembers the fullscreen display dimensions.
-3. After focus returns, it waits for the matching `WM_DISPLAYCHANGE` and then waits 250 ms. A 2.25-second timer is used as a fallback if that display message is not received.
-4. If the game is foreground, focused, visible, and not minimized, the saved rectangle is reapplied only when the current clip differs.
-5. A clip applied by the recovery code is released on the next focus loss.
+Por segurança, o arquivo fornecido começa em modo **proxy-only**, com todos os
+hooks invasivos desligados. Primeiro execute o jogo dessa forma e confirme que a
+janela abre normalmente. O log deve conter `dinput8=PROXY-ONLY`.
 
-The implementation details are documented in [`CursorClip_Recovery.md`](CursorClip_Recovery.md).
+Depois, feche o jogo e habilite apenas um subsistema por vez em
+`FocusDiagnostic.ini`, nesta ordem recomendada:
+
+```ini
+[Hooks]
+Window=1
+D3D8=0
+D3D8CreateDevice=0
+D3D8Device=0
+DirectInput=0
+Cursor=0
+```
+
+Teste novamente, depois habilite `DirectInput`, `Cursor` e `D3D8`. Se o jogo
+voltar a fechar ao habilitar uma opção, deixe-a em `0` e guarde o último
+`FocusDiagnostic.log`; isso identifica o hook incompatível.
+
+`D3D8=1` intercepta apenas a função de fábrica e não altera objetos COM.
+`D3D8CreateDevice` e `D3D8Device` estão reservados, mas desabilitados nesta
+versão. Os testes no Delta Force 1.5.0.5 mostraram corrupção de `ESP` ao
+interceptar `IDirect3D8::CreateDevice`, tanto com a ABI COM quanto com a ABI
+`__thiscall`. Colocar essas opções em `1` apenas produz `DISABLED-ABI` no log e
+não modifica nenhuma vtable. O modo D3D seguro registra somente
+`Direct3DCreate8`; portanto `Present`, `Reset` e o contador de frames não estão
+disponíveis nesta versão.
+
+Com `Window=1`, o procedimento de foco é:
+
+1. Entre no gameplay e pressione **F10** para gravar `USER MARKER`.
+2. Faça `Alt+Tab`, aguarde e retorne ao jogo.
+3. Se houver falha, pressione **F11** para gravar um snapshot.
+4. Feche normalmente o jogo e abra `FocusDiagnostic.log`.
+
+O logger registra:
+
+- ativação, foco, redimensionamento e mudança de display da janela;
+- criação do objeto Direct3D 8 por `Direct3DCreate8`;
+- `Acquire` e `Unacquire` de mouse e teclado;
+- `ClipCursor` e `SetCursorPos` quando importados diretamente pelo executável;
+- HRESULTs legíveis e IDs das threads;
+- `LIKELY FAILURE AREA` no snapshot e um resumo após timeout de cinco segundos.
+
+Categorias possíveis incluem `WINDOW_ACTIVATION`, `D3D_DEVICE_LOST`,
+`D3D_RESET`, `RENDER_LOOP`, `KEYBOARD_ACQUIRE`, `MOUSE_ACQUIRE` e
+`INCONCLUSIVE`.
+
+## Como os hooks funcionam
+
+- A proxy exporta as cinco entradas convencionais de `dinput8.dll`, carrega a
+  biblioteca verdadeira diretamente do diretório do sistema e encaminha as chamadas.
+- As funções Win32 e a fábrica `Direct3DCreate8` são interceptadas na IAT do
+  executável principal; `DirectInput8Create` é capturada diretamente pela proxy.
+- Os objetos DirectInput capturados recebem uma cópia instrumentada de sua
+  vtable. Objetos Direct3D não são modificados nesta versão.
+- Os eventos são enfileirados e uma thread separada grava o arquivo para reduzir
+  interferência no timing do jogo.
+- A inicialização aguarda por até 30 segundos pela janela principal do processo.
+
+## Limitações da versão 0.1
+
+- O executável precisa importar `dinput8.dll`; confirme com `dumpbin /imports`.
+- Se já existir uma `dinput8.dll` na pasta do jogo, não a sobrescreva sem antes
+  identificar se ela pertence a outro mod ou wrapper.
+- APIs de D3D/cursor resolvidas exclusivamente por `GetProcAddress` ou chamadas
+  por módulos auxiliares não são interceptadas.
+- Esta versão acompanha um objeto Direct3D e um dispositivo de cada tipo
+  (mouse/teclado), que é o padrão esperado para o jogo alvo.
+- O resultado `INCONCLUSIVE` significa que os eventos observados não bastam para
+  atribuir a falha com segurança; ele não deve ser tratado como confirmação de
+  que todos os subsistemas estão corretos.
+- Quando `D3D8Device=0`, o contador de frames permanece zero por falta de
+  instrumentação. Nesse modo o diagnóstico não classifica mais a ausência de
+  `Present` como `RENDER_LOOP`.
+- Em uma recuperação com monitoramento D3D desligado, o timeout é registrado
+  como `PARTIAL`/`D3D NOT MONITORED`, e não como falha do render loop.
+- O diagnóstico memoriza o último clipping ativo antes da perda de foco. Se o
+  jogo liberar o clipping no Alt+Tab e não o restaurar após cinco segundos, o
+  resultado será `CURSOR_STATE`. Mouse e teclado aparecem como `NOT OBSERVED`
+  até que uma chamada real de `Acquire` seja interceptada.
+
+## Teste experimental de restauração do cursor
+
+Por padrão a DLL continua passiva. Para um teste A/B isolado, habilite:
+
+```ini
+[Recovery]
+RestoreCursorClip=1
+RestoreCursorClipDelayMs=250
+WaitForDisplayChange=1
+UseSetCapture=0
+ForceWindowActivation=0
+ForceDirectInputAcquire=0
+```
+
+Depois de `WM_SETFOCUS`/`WM_ACTIVATEAPP TRUE`, a DLL espera o modo de vídeo do
+jogo reaparecer e mais `RestoreCursorClipDelayMs`. Se o clipping real diferir do
+último retângulo ativo anterior ao Alt+Tab, ela reaplica esse retângulo uma única
+vez na tentativa e registra `CURSOR RECOVERY ACTION` com os estados anterior e
+posterior. Se a mudança de display não chegar, há um fallback de dois segundos.
+
+A ação só ocorre quando a janela ainda é foreground, focused, visível e não
+minimizada. Ao perder foco novamente, qualquer clipping aplicado pela DLL é
+liberado. `UseSetCapture`, `ForceWindowActivation` e `ForceDirectInputAcquire`
+são reservados e não executam ações nesta versão. Se o cursor ficar preso ou o
+jogo se comportar pior, volte imediatamente para `RestoreCursorClip=0`.
+
+Compare duas sessões idênticas, primeiro com `RestoreCursorClip=0` e depois com
+`RestoreCursorClip=1`, observando separadamente se o cursor escapa e se a
+sensação de performance em background muda.
