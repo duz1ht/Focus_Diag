@@ -27,101 +27,96 @@ HWND WindowThreadFocus(HWND window) {
     return thread && GetGUIThreadInfo(thread, &info) ? info.hwndFocus : nullptr;
 }
 
-const char* NullClipClassificationName(NullClipClassification classification) {
-    switch (classification) {
-        case NullClipClassification::Pending: return "PENDING";
-        case NullClipClassification::FocusTransition: return "FOCUS_TRANSITION";
-        case NullClipClassification::IntentionalRelease: return "INTENTIONAL_RELEASE";
+const char* DeactivationStateName(DeactivationState state) {
+    switch (state) {
+        case DeactivationState::DeactivationPending: return "DEACTIVATION_PENDING";
+        case DeactivationState::FocusTransitionConfirmed: return "FOCUS_TRANSITION_CONFIRMED";
+        case DeactivationState::CloseRequested: return "CLOSE_REQUESTED";
+        case DeactivationState::Shutdown: return "SHUTDOWN";
+        case DeactivationState::IntentionalRelease: return "INTENTIONAL_RELEASE";
         default: return "NONE";
     }
 }
 
-namespace {
-constexpr ULONGLONG kNullFocusTransitionWindowMs = 5000;
-
-void ClassifyPendingNullForFocusLoss() {
-    auto& state = State();
-    if (!state.nullClipPending ||
-        state.nullClipClassification == NullClipClassification::FocusTransition)
-        return;
-
-    const HWND game = state.gameWindow.load();
-    const HWND foreground = GetForegroundWindow();
-    const HWND focus = WindowThreadFocus(game);
-    const bool displayChanged =
-        state.displayWidth != state.nullClipDisplayWidth ||
-        state.displayHeight != state.nullClipDisplayHeight;
-    const ULONGLONG age = GetTickCount64() - state.nullClipAt.load();
-    const bool transition = age <= kNullFocusTransitionWindowMs &&
-        (foreground != game || focus != game || displayChanged);
-    if (!transition) return;
-
-    state.nullClipClassification = NullClipClassification::FocusTransition;
-    state.restoreClipExpected = true;
-    state.expectedDisplayWidth = state.nullClipDisplayWidth.load();
-    state.expectedDisplayHeight = state.nullClipDisplayHeight.load();
-    Logger::Instance().Write("CLIPCURSOR/NULL",
-        "classified=FOCUS_TRANSITION foreground=%p focus=%p display=%ux%u "
-        "null-foreground=%p null-focus=%p null-display=%ux%u age=%llu ms dll-owned=%s",
-        foreground, focus, state.displayWidth.load(), state.displayHeight.load(),
-        state.nullClipForeground.load(), state.nullClipFocus.load(),
-        state.nullClipDisplayWidth.load(), state.nullClipDisplayHeight.load(),
-        age,
-        state.nullClipWasDllOwned ? "YES" : "NO");
-}
-}  // namespace
-
-void BeginFocusLoss() {
-    auto& state = State();
-    if (state.recovering && !state.focusReturned) {
-        ClassifyPendingNullForFocusLoss();
-        return;
+const char* DeactivationEventName(UINT message) {
+    switch (message) {
+        case WM_ACTIVATE: return "WM_ACTIVATE";
+        case WM_ACTIVATEAPP: return "WM_ACTIVATEAPP";
+        case WM_SETFOCUS: return "WM_SETFOCUS";
+        case WM_KILLFOCUS: return "WM_KILLFOCUS";
+        case WM_CLOSE: return "WM_CLOSE";
+        case WM_QUERYENDSESSION: return "WM_QUERYENDSESSION";
+        case WM_ENDSESSION: return "WM_ENDSESSION";
+        case WM_DESTROY: return "WM_DESTROY";
+        case WM_NCDESTROY: return "WM_NCDESTROY";
+        default: return "NONE";
     }
+}
+
+void BeginFocusLoss(UINT message) {
+    auto& state = State();
+    const DeactivationState current = state.deactivationState.load();
+    if (current == DeactivationState::CloseRequested ||
+        current == DeactivationState::Shutdown)
+        return;
+    if (state.recovering && !state.focusReturned) return;
     state.recovering = true;
 
-    state.restoreClipExpected = state.clipActive.load();
-    state.expectedDisplayWidth = state.displayWidth.load();
-    state.expectedDisplayHeight = state.displayHeight.load();
+    state.restoreClipExpected = state.clipActive.load() || state.nullClipPending.load();
+    state.expectedDisplayWidth = state.nullClipPending
+        ? state.nullClipDisplayWidth.load() : state.displayWidth.load();
+    state.expectedDisplayHeight = state.nullClipPending
+        ? state.nullClipDisplayHeight.load() : state.displayHeight.load();
     state.focusReturned = false;
     state.displayConfirmed = false;
     state.clipRestorePending = false;
     state.focusReturnedAt = 0;
+    state.deactivationState = DeactivationState::DeactivationPending;
+    state.deactivationEvent = message;
     ++state.attempt;
-    if (state.nullClipPending) {
-        state.nullClipClassification = NullClipClassification::Pending;
-        ClassifyPendingNullForFocusLoss();
-    }
-    Logger::Instance().Write("RECOVERY", "Attempt %lu: focus lost; restore expected=%s",
+    Logger::Instance().Write("RECOVERY",
+        "Attempt %lu: deactivation pending; restore expected=%s",
         state.attempt.load(), state.restoreClipExpected ? "YES" : "NO");
 }
 
-void RecordFocusReturn() {
+void RecordFocusReturn(UINT message) {
     auto& state = State();
-    if (!state.recovering) return;
-    if (state.focusReturned.exchange(true)) return;
-    ClassifyPendingNullForFocusLoss();
-    if (state.nullClipPending &&
-        state.nullClipClassification == NullClipClassification::Pending) {
-        state.nullClipClassification = NullClipClassification::IntentionalRelease;
-        state.nullClipPending = false;
-        state.restoreClipExpected = false;
-        Logger::Instance().Write("CLIPCURSOR/NULL",
-            "classified=INTENTIONAL_RELEASE foreground-at-null=%p focus-at-null=%p "
-            "display-at-null=%ux%u age=%llu ms dll-owned=%s",
-            state.nullClipForeground.load(), state.nullClipFocus.load(),
-            state.nullClipDisplayWidth.load(), state.nullClipDisplayHeight.load(),
-            GetTickCount64() - state.nullClipAt.load(),
-            state.nullClipWasDllOwned ? "YES" : "NO");
+    const HWND game = state.gameWindow.load();
+    const bool validReturn = game && IsWindow(game) && GetForegroundWindow() == game &&
+        WindowThreadFocus(game) == game && IsWindowVisible(game) && !IsIconic(game);
+    if (state.deactivationState == DeactivationState::CloseRequested && validReturn) {
+        state.deactivationState = DeactivationState::None;
+        state.deactivationEvent = 0;
+        Logger::Instance().Write("RECOVERY", "CLOSE_REQUESTED cancelled; window remained active");
+        return;
     }
+    if (!state.recovering) return;
+    if (state.deactivationState != DeactivationState::DeactivationPending) return;
+    if (!validReturn) {
+        Logger::Instance().Write("RECOVERY",
+            "Attempt %lu: return not confirmed; game=%p valid=%s foreground=%p focus=%p "
+            "visible=%s iconic=%s",
+            state.attempt.load(), game, game && IsWindow(game) ? "YES" : "NO",
+            GetForegroundWindow(), WindowThreadFocus(game),
+            game && IsWindowVisible(game) ? "YES" : "NO",
+            game && IsIconic(game) ? "YES" : "NO");
+        return;
+    }
+    if (state.focusReturned.exchange(true)) return;
+    state.deactivationState = DeactivationState::FocusTransitionConfirmed;
+    state.deactivationEvent = message;
+    state.displayConfirmed =
+        state.displayWidth == state.expectedDisplayWidth &&
+        state.displayHeight == state.expectedDisplayHeight;
     state.focusReturnedAt = GetTickCount64();
-    Logger::Instance().Write("RECOVERY", "Attempt %lu: focus returned", state.attempt.load());
+    Logger::Instance().Write("RECOVERY",
+        "Attempt %lu: FOCUS_TRANSITION_CONFIRMED", state.attempt.load());
 }
 
 void RecordDisplayChange(UINT width, UINT height) {
     auto& state = State();
     state.displayWidth = width;
     state.displayHeight = height;
-    if (state.recovering) ClassifyPendingNullForFocusLoss();
     if (state.recovering && state.focusReturned &&
         width == state.expectedDisplayWidth && height == state.expectedDisplayHeight)
         state.displayConfirmed = true;
@@ -136,7 +131,10 @@ void RecordClipState(const RECT* requested, const RECT& actual, bool succeeded) 
     state.clipActive = requested != nullptr;
     if (requested) {
         state.nullClipPending = false;
-        state.nullClipClassification = NullClipClassification::None;
+        if (!state.recovering) {
+            state.deactivationState = DeactivationState::None;
+            state.deactivationEvent = 0;
+        }
         state.expectedClipLeft = actual.left;
         state.expectedClipTop = actual.top;
         state.expectedClipRight = actual.right;
@@ -153,8 +151,12 @@ void RecordClipState(const RECT* requested, const RECT& actual, bool succeeded) 
         state.nullClipDisplayHeight = state.displayHeight.load();
         state.nullClipWasDllOwned = wasDllOwned;
         state.nullClipHadActive = hadActive;
-        state.nullClipClassification = state.nullClipPending
-            ? NullClipClassification::Pending : NullClipClassification::IntentionalRelease;
+        const DeactivationState transition = state.deactivationState.load();
+        if (transition != DeactivationState::CloseRequested &&
+            transition != DeactivationState::Shutdown && !state.recovering) {
+            state.deactivationState = DeactivationState::IntentionalRelease;
+            state.deactivationEvent = 0;
+        }
         Logger::Instance().Write("CLIPCURSOR/NULL",
             "candidate=%s foreground=%p focus=%p iconic=%s visible=%s display=%ux%u "
             "had-active=%s dll-owned=%s",
@@ -165,6 +167,34 @@ void RecordClipState(const RECT* requested, const RECT& actual, bool succeeded) 
             hadActive ? "YES" : "NO",
             wasDllOwned ? "YES" : "NO");
     }
+}
+
+void RecordCloseRequested(UINT message) {
+    auto& state = State();
+    state.deactivationState = DeactivationState::CloseRequested;
+    state.deactivationEvent = message;
+    state.restoreClipExpected = false;
+    state.clipRestorePending = false;
+    Logger::Instance().Write("RECOVERY", "CLOSE_REQUESTED");
+}
+
+void RecordCloseCancelled() {
+    auto& state = State();
+    if (state.deactivationState != DeactivationState::CloseRequested) return;
+    state.deactivationState = DeactivationState::None;
+    state.deactivationEvent = 0;
+    Logger::Instance().Write("RECOVERY", "CLOSE_REQUESTED cancelled");
+}
+
+void RecordShutdown(UINT message) {
+    auto& state = State();
+    state.deactivationState = DeactivationState::Shutdown;
+    state.deactivationEvent = message;
+    state.restoreClipExpected = false;
+    state.clipRestorePending = false;
+    state.recovering = false;
+    Logger::Instance().Write("RECOVERY", "SHUTDOWN confirmed by %s",
+                             DeactivationEventName(message));
 }
 
 void WriteSnapshot(const char* reason) {
@@ -182,8 +212,9 @@ void WriteSnapshot(const char* reason) {
         state.focusReturned ? "YES" : "NO", state.displayConfirmed ? "YES" : "NO",
         state.clipRestorePending ? "YES" : "NO");
     Logger::Instance().Write("SNAPSHOT",
-        "game=%p foreground=%p focus=%p iconic=%s visible=%s",
-        game, GetForegroundWindow(), WindowThreadFocus(game), game && IsIconic(game) ? "YES" : "NO",
+        "game=%p valid=%s foreground=%p focus=%p iconic=%s visible=%s",
+        game, game && IsWindow(game) ? "YES" : "NO",
+        GetForegroundWindow(), WindowThreadFocus(game), game && IsIconic(game) ? "YES" : "NO",
         game && IsWindowVisible(game) ? "YES" : "NO");
     Logger::Instance().Write("SNAPSHOT",
         "clip-observed=%s restore-expected=%s applied-by-dll=%s restored=%s query=%s",
@@ -195,11 +226,12 @@ void WriteSnapshot(const char* reason) {
         expected.left, expected.top, expected.right, expected.bottom,
         current.left, current.top, current.right, current.bottom);
     Logger::Instance().Write("SNAPSHOT",
-        "null-pending=%s null-classification=%s null-at=%llu null-foreground=%p "
+        "deactivation-state=%s deactivation-event=%s null-pending=%s null-at=%llu null-foreground=%p "
         "null-focus=%p null-iconic=%s null-visible=%s null-display=%ux%u "
         "null-had-active=%s null-dll-owned=%s",
-        state.nullClipPending ? "YES" : "NO",
-        NullClipClassificationName(state.nullClipClassification.load()), state.nullClipAt.load(),
+        DeactivationStateName(state.deactivationState.load()),
+        DeactivationEventName(state.deactivationEvent.load()),
+        state.nullClipPending ? "YES" : "NO", state.nullClipAt.load(),
         state.nullClipForeground.load(), state.nullClipFocus.load(),
         state.nullClipIconic ? "YES" : "NO", state.nullClipVisible ? "YES" : "NO",
         state.nullClipDisplayWidth.load(), state.nullClipDisplayHeight.load(),

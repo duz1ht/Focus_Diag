@@ -5,8 +5,9 @@
 
 namespace fd {
 
-enum class NullClipClassification : int {
-    None, Pending, FocusTransition, IntentionalRelease
+enum class DeactivationState : int {
+    None, DeactivationPending, FocusTransitionConfirmed,
+    CloseRequested, Shutdown, IntentionalRelease
 };
 
 struct DiagnosticState {
@@ -40,18 +41,23 @@ struct DiagnosticState {
     std::atomic<UINT> nullClipDisplayHeight{0};
     std::atomic<bool> nullClipWasDllOwned{false};
     std::atomic<bool> nullClipHadActive{false};
-    std::atomic<NullClipClassification> nullClipClassification{NullClipClassification::None};
+    std::atomic<DeactivationState> deactivationState{DeactivationState::None};
+    std::atomic<UINT> deactivationEvent{0};
 };
 
 DiagnosticState& State();
 RECT ExpectedClip();
 bool RectsEqual(const RECT& left, const RECT& right);
-void BeginFocusLoss();
-void RecordFocusReturn();
+void BeginFocusLoss(UINT message);
+void RecordFocusReturn(UINT message);
 void RecordDisplayChange(UINT width, UINT height);
 void RecordClipState(const RECT* requested, const RECT& actual, bool succeeded);
+void RecordCloseRequested(UINT message);
+void RecordCloseCancelled();
+void RecordShutdown(UINT message);
 void WriteSnapshot(const char* reason);
 HWND WindowThreadFocus(HWND window);
-const char* NullClipClassificationName(NullClipClassification classification);
+const char* DeactivationStateName(DeactivationState state);
+const char* DeactivationEventName(UINT message);
 
 }  // namespace fd

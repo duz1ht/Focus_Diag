@@ -80,8 +80,9 @@ O log contém apenas informações necessárias para avaliar a restauração:
 - validação de foreground, foco, visibilidade e minimização;
 - retângulos esperado, anterior e posterior;
 - se a restauração era necessária, se a chamada funcionou e se foi confirmada;
-- classificação de `ClipCursor(NULL)` como transição de foco ou liberação
-  intencional, com foreground, foco, display e propriedade do clipping;
+- estado da desativação (`DEACTIVATION_PENDING`, retorno confirmado, solicitação
+  de fechamento ou `SHUTDOWN`), com foreground, foco, display e propriedade do
+  clipping;
 - snapshots manuais e automáticos de sucesso ou falha.
 
 Durante o teste:
@@ -97,11 +98,13 @@ log informa `NO ACTIVE CLIP CAPTURED BEFORE FOCUS LOSS`; nesse caso não existe 
 retângulo válido para restaurar.
 
 Quando o jogo chama `ClipCursor(NULL)` antes das mensagens formais de perda de
-foco, a DLL mantém o último retângulo ativo como candidato. A chamada é
-classificada como `FOCUS_TRANSITION` somente quando foreground, foco ou mudança
-de display comprovam a transição em até cinco segundos e não houve uma chamada
-não nula posterior. Sem essa evidência, ela é classificada como
-`INTENTIONAL_RELEASE` e não é restaurada.
+foco, a DLL mantém o último retângulo ativo como candidato. Perda de foco,
+desativação e mudança de display produzem apenas `DEACTIVATION_PENDING`, pois
+também acontecem durante o encerramento. A transição só se torna
+`FOCUS_TRANSITION_CONFIRMED` quando a mesma janela válida recupera foreground e
+foco, continua visível e não está minimizada. `WM_CLOSE` registra apenas uma
+solicitação; `WM_DESTROY`, `WM_NCDESTROY` ou `WM_ENDSESSION TRUE` confirmam
+`SHUTDOWN` e cancelam a recuperação.
 
 ## Limitações
 

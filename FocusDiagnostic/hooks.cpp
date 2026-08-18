@@ -142,7 +142,9 @@ void FinishWithoutRestore(const char* reason) {
 void ArmCursorRecovery(bool displayConfirmed) {
     std::lock_guard<std::recursive_mutex> lock(g_recoveryMutex);
     auto& state = State();
-    if (!state.recovering || !state.focusReturned) return;
+    if (!state.recovering || !state.focusReturned ||
+        state.deactivationState != DeactivationState::FocusTransitionConfirmed)
+        return;
     if (!state.restoreClipExpected) {
         FinishWithoutRestore("NO ACTIVE CLIP CAPTURED BEFORE FOCUS LOSS");
         return;
@@ -188,11 +190,12 @@ void ApplyCursorRecovery(unsigned long scheduledAttempt, ULONGLONG scheduledAt,
     state.clipRestorePending = false;
     const unsigned long attempt = state.attempt.load();
     if (!state.recovering || !state.restoreClipExpected ||
+        state.deactivationState != DeactivationState::FocusTransitionConfirmed ||
         state.clipRestoredAttempt.load() == attempt || !g_clipCursor)
         return;
 
     const HWND game = state.gameWindow.load();
-    const bool validWindow = game && GetForegroundWindow() == game &&
+    const bool validWindow = game && IsWindow(game) && GetForegroundWindow() == game &&
                              WindowThreadFocus(game) == game &&
                              !IsIconic(game) && IsWindowVisible(game);
     if (!validWindow) {
@@ -211,8 +214,7 @@ void ApplyCursorRecovery(unsigned long scheduledAttempt, ULONGLONG scheduledAt,
     state.clipRestoredAttempt = attempt;
     state.clipAppliedByDiagnostic = needed && restored;
     if (restored) state.clipActive = true;
-    if (state.nullClipClassification == NullClipClassification::FocusTransition)
-        state.nullClipPending = false;
+    state.nullClipPending = false;
     state.recovering = false;
     const ULONGLONG actualDelay = startedAt - scheduledAt;
     const LONGLONG lateness = static_cast<LONGLONG>(actualDelay) - scheduledDelay;
@@ -256,31 +258,31 @@ LRESULT CALLBACK HookWndProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
             Logger::Instance().Write("FOCUS", "WM_ACTIVATE -> %u", LOWORD(wParam));
             if (LOWORD(wParam) == WA_INACTIVE) {
                 CancelCursorRecovery(true);
-                BeginFocusLoss();
+                BeginFocusLoss(message);
             } else {
-                RecordFocusReturn();
-                ArmCursorRecovery(false);
+                RecordFocusReturn(message);
+                ArmCursorRecovery(State().displayConfirmed);
             }
             break;
         case WM_ACTIVATEAPP:
             Logger::Instance().Write("FOCUS", "WM_ACTIVATEAPP -> %s", wParam ? "TRUE" : "FALSE");
             if (wParam) {
-                RecordFocusReturn();
-                ArmCursorRecovery(false);
+                RecordFocusReturn(message);
+                ArmCursorRecovery(State().displayConfirmed);
             } else {
                 CancelCursorRecovery(true);
-                BeginFocusLoss();
+                BeginFocusLoss(message);
             }
             break;
         case WM_SETFOCUS:
             Logger::Instance().Write("FOCUS", "WM_SETFOCUS");
-            RecordFocusReturn();
-            ArmCursorRecovery(false);
+            RecordFocusReturn(message);
+            ArmCursorRecovery(State().displayConfirmed);
             break;
         case WM_KILLFOCUS:
             Logger::Instance().Write("FOCUS", "WM_KILLFOCUS");
             CancelCursorRecovery(true);
-            BeginFocusLoss();
+            BeginFocusLoss(message);
             break;
         case WM_DISPLAYCHANGE: {
             const UINT width = LOWORD(lParam);
@@ -294,9 +296,32 @@ LRESULT CALLBACK HookWndProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
             if (wParam == VK_F10) Logger::Instance().Write("MARKER", "========== USER MARKER ==========");
             if (wParam == VK_F11) WriteSnapshot("MANUAL SNAPSHOT");
             break;
-        case WM_DESTROY:
-        case WM_NCDESTROY:
+        case WM_CLOSE:
+            Logger::Instance().Write("WINDOW", "WM_CLOSE");
             CancelCursorRecovery(true);
+            RecordCloseRequested(message);
+            break;
+        case WM_QUERYENDSESSION:
+            Logger::Instance().Write("WINDOW", "WM_QUERYENDSESSION");
+            CancelCursorRecovery(true);
+            RecordCloseRequested(message);
+            break;
+        case WM_ENDSESSION:
+            Logger::Instance().Write("WINDOW", "WM_ENDSESSION -> %s", wParam ? "TRUE" : "FALSE");
+            if (wParam) {
+                CancelCursorRecovery(true);
+                RecordShutdown(message);
+            } else RecordCloseCancelled();
+            break;
+        case WM_DESTROY:
+            Logger::Instance().Write("WINDOW", "WM_DESTROY");
+            CancelCursorRecovery(true);
+            RecordShutdown(message);
+            break;
+        case WM_NCDESTROY:
+            Logger::Instance().Write("WINDOW", "WM_NCDESTROY");
+            CancelCursorRecovery(true);
+            RecordShutdown(message);
             break;
     }
     return CallWindowProcW(g_originalWndProc, window, message, wParam, lParam);
