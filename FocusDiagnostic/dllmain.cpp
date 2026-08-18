@@ -12,11 +12,6 @@ DWORD WINAPI Initialize(void*) {
 }
 }  // namespace
 
-extern "C" __declspec(dllexport) void WINAPI FocusDiagnosticShutdown() {
-    fd::RemoveHooks();
-    fd::Logger::Instance().Stop();
-}
-
 BOOL WINAPI DllMain(HMODULE module, DWORD reason, void*) {
     if (reason == DLL_PROCESS_ATTACH) {
         g_module = module;

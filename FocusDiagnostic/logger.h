@@ -12,7 +12,6 @@ namespace fd {
 class Logger final {
 public:
     bool Start(HMODULE module);
-    void Stop();
     void Write(const char* category, const char* format, ...);
     void WriteV(const char* category, const char* format, va_list args);
     static Logger& Instance();
@@ -26,13 +25,10 @@ private:
     HANDLE event_ = nullptr;
     HANDLE thread_ = nullptr;
     std::atomic<bool> started_{false};
-    std::atomic<bool> stopping_{false};
     mutable LARGE_INTEGER frequency_{};
     LARGE_INTEGER startCounter_{};
     std::mutex mutex_;
     std::deque<std::string> queue_;
 };
-
-const char* HResultName(HRESULT value);
 
 }  // namespace fd
