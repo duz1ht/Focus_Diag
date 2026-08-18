@@ -5,12 +5,10 @@
 
 #include <atomic>
 #include <cstring>
+#include <mutex>
 
 namespace fd {
 namespace {
-
-constexpr UINT_PTR kDiagnosticTimer = 0xF0C05;
-constexpr UINT_PTR kCursorRecoveryTimer = 0xF0C06;
 
 using ClipCursorFn = BOOL(WINAPI*)(const RECT*);
 
@@ -21,6 +19,14 @@ thread_local bool g_insideClipHook = false;
 bool g_restoreCursorClip = true;
 bool g_waitForDisplayChange = true;
 UINT g_restoreCursorClipDelayMs = 250;
+HANDLE g_scheduleEvent{};
+HANDLE g_schedulerThread{};
+std::atomic<bool> g_scheduleArmed{false};
+std::atomic<unsigned long> g_scheduledAttempt{0};
+std::atomic<ULONGLONG> g_scheduledAt{0};
+std::atomic<ULONGLONG> g_scheduledDue{0};
+std::atomic<UINT> g_scheduledDelay{0};
+std::recursive_mutex g_recoveryMutex;
 
 BOOL WINAPI HookClipCursor(const RECT* rect);
 
@@ -86,6 +92,7 @@ bool PatchClipCursorImport(HMODULE module) {
 
 BOOL WINAPI HookClipCursor(const RECT* rect) {
     if (g_insideClipHook) return g_clipCursor(rect);
+    std::lock_guard<std::recursive_mutex> lock(g_recoveryMutex);
     g_insideClipHook = true;
     const BOOL result = g_clipCursor(rect);
     RECT actual{};
@@ -108,7 +115,9 @@ BOOL WINAPI HookClipCursor(const RECT* rect) {
 }
 
 void CancelCursorRecovery(bool releaseAppliedClip) {
-    if (g_window) KillTimer(g_window, kCursorRecoveryTimer);
+    std::lock_guard<std::recursive_mutex> lock(g_recoveryMutex);
+    g_scheduleArmed = false;
+    if (g_scheduleEvent) SetEvent(g_scheduleEvent);
     auto& state = State();
     state.clipRestorePending = false;
     if (releaseAppliedClip && state.clipAppliedByDiagnostic.exchange(false) && g_clipCursor) {
@@ -119,8 +128,10 @@ void CancelCursorRecovery(bool releaseAppliedClip) {
 }
 
 void FinishWithoutRestore(const char* reason) {
+    std::lock_guard<std::recursive_mutex> lock(g_recoveryMutex);
     auto& state = State();
-    if (g_window) KillTimer(g_window, kCursorRecoveryTimer);
+    g_scheduleArmed = false;
+    if (g_scheduleEvent) SetEvent(g_scheduleEvent);
     state.clipRestorePending = false;
     state.recovering = false;
     Logger::Instance().Write("CLIPCURSOR/RECOVERY", "Attempt %lu: %s",
@@ -129,6 +140,7 @@ void FinishWithoutRestore(const char* reason) {
 }
 
 void ArmCursorRecovery(bool displayConfirmed) {
+    std::lock_guard<std::recursive_mutex> lock(g_recoveryMutex);
     auto& state = State();
     if (!state.recovering || !state.focusReturned) return;
     if (!state.restoreClipExpected) {
@@ -144,19 +156,35 @@ void ArmCursorRecovery(bool displayConfirmed) {
 
     const UINT delay = displayConfirmed || !g_waitForDisplayChange
         ? g_restoreCursorClipDelayMs : 2000 + g_restoreCursorClipDelayMs;
-    KillTimer(g_window, kCursorRecoveryTimer);
-    if (SetTimer(g_window, kCursorRecoveryTimer, delay, nullptr)) {
-        state.clipRestorePending = true;
-        Logger::Instance().Write("CLIPCURSOR/RECOVERY",
-            "Attempt %lu armed; delay=%u ms; display-confirmed=%s",
-            state.attempt.load(), delay, displayConfirmed ? "YES" : "NO");
-    } else {
-        FinishWithoutRestore("FAILED TO CREATE RECOVERY TIMER");
+    if (!g_scheduleEvent || !g_schedulerThread) {
+        FinishWithoutRestore("RECOVERY SCHEDULER UNAVAILABLE");
+        return;
     }
+    const ULONGLONG scheduledAt = GetTickCount64();
+    g_scheduledAttempt = state.attempt.load();
+    g_scheduledAt = scheduledAt;
+    g_scheduledDelay = delay;
+    g_scheduledDue = scheduledAt + delay;
+    g_scheduleArmed = true;
+    state.clipRestorePending = true;
+    SetEvent(g_scheduleEvent);
+    Logger::Instance().Write("CLIPCURSOR/RECOVERY",
+        "Attempt %lu armed; scheduler=WORKER scheduled-at=%llu delay=%u due=%llu "
+        "display-confirmed=%s",
+        state.attempt.load(), scheduledAt, delay, scheduledAt + delay,
+        displayConfirmed ? "YES" : "NO");
 }
 
-void ApplyCursorRecovery() {
+void ApplyCursorRecovery(unsigned long scheduledAttempt, ULONGLONG scheduledAt,
+                         UINT scheduledDelay, ULONGLONG startedAt) {
+    std::lock_guard<std::recursive_mutex> lock(g_recoveryMutex);
     auto& state = State();
+    if (scheduledAttempt != state.attempt.load() || !state.clipRestorePending) {
+        Logger::Instance().Write("CLIPCURSOR/RECOVERY",
+            "Discarded stale schedule attempt=%lu current-attempt=%lu",
+            scheduledAttempt, state.attempt.load());
+        return;
+    }
     state.clipRestorePending = false;
     const unsigned long attempt = state.attempt.load();
     if (!state.recovering || !state.restoreClipExpected ||
@@ -164,7 +192,8 @@ void ApplyCursorRecovery() {
         return;
 
     const HWND game = state.gameWindow.load();
-    const bool validWindow = game && GetForegroundWindow() == game && GetFocus() == game &&
+    const bool validWindow = game && GetForegroundWindow() == game &&
+                             WindowThreadFocus(game) == game &&
                              !IsIconic(game) && IsWindowVisible(game);
     if (!validWindow) {
         FinishWithoutRestore("WINDOW VALIDATION FAILED");
@@ -182,24 +211,43 @@ void ApplyCursorRecovery() {
     state.clipRestoredAttempt = attempt;
     state.clipAppliedByDiagnostic = needed && restored;
     if (restored) state.clipActive = true;
+    if (state.nullClipClassification == NullClipClassification::FocusTransition)
+        state.nullClipPending = false;
     state.recovering = false;
+    const ULONGLONG actualDelay = startedAt - scheduledAt;
+    const LONGLONG lateness = static_cast<LONGLONG>(actualDelay) - scheduledDelay;
     Logger::Instance().Write("CLIPCURSOR/RECOVERY",
         "Attempt %lu expected=(%ld,%ld)-(%ld,%ld) before=(%ld,%ld)-(%ld,%ld) "
-        "after=(%ld,%ld)-(%ld,%ld) needed=%s call=%s query=%s restored=%s elapsed=%llu ms",
+        "after=(%ld,%ld)-(%ld,%ld) needed=%s call=%s query=%s restored=%s "
+        "scheduled-delay=%u actual-delay=%llu timer-lateness=%lld elapsed=%llu ms",
         attempt, expected.left, expected.top, expected.right, expected.bottom,
         before.left, before.top, before.right, before.bottom,
         after.left, after.top, after.right, after.bottom, needed ? "YES" : "NO",
         applied ? "TRUE" : "FALSE", queriedAfter ? "OK" : "FAILED",
-        restored ? "YES" : "NO",
+        restored ? "YES" : "NO", scheduledDelay, actualDelay, lateness,
         state.focusReturnedAt ? GetTickCount64() - state.focusReturnedAt.load() : 0);
     WriteSnapshot(restored ? "CLIP RESTORATION SUCCESS" : "CLIP RESTORATION FAILURE");
 }
 
-void CheckRecoveryTimeout() {
-    auto& state = State();
-    const ULONGLONG returnedAt = state.focusReturnedAt.load();
-    if (state.recovering && returnedAt && GetTickCount64() - returnedAt >= 5000)
-        FinishWithoutRestore("CLIP RESTORATION TIMEOUT");
+DWORD WINAPI RecoverySchedulerThread(void*) {
+    for (;;) {
+        DWORD timeout = INFINITE;
+        if (g_scheduleArmed.load(std::memory_order_acquire)) {
+            const ULONGLONG now = GetTickCount64();
+            const ULONGLONG due = g_scheduledDue.load(std::memory_order_acquire);
+            timeout = due <= now ? 0 : static_cast<DWORD>(due - now);
+        }
+        const DWORD wait = WaitForSingleObject(g_scheduleEvent, timeout);
+        if (wait != WAIT_TIMEOUT) continue;
+        std::lock_guard<std::recursive_mutex> lock(g_recoveryMutex);
+        const ULONGLONG startedAt = GetTickCount64();
+        if (!g_scheduleArmed || g_scheduledDue.load() > startedAt) continue;
+        const unsigned long attempt = g_scheduledAttempt.load();
+        const ULONGLONG scheduledAt = g_scheduledAt.load();
+        const UINT delay = g_scheduledDelay.load();
+        g_scheduleArmed = false;
+        ApplyCursorRecovery(attempt, scheduledAt, delay, startedAt);
+    }
 }
 
 LRESULT CALLBACK HookWndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -246,13 +294,6 @@ LRESULT CALLBACK HookWndProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
             if (wParam == VK_F10) Logger::Instance().Write("MARKER", "========== USER MARKER ==========");
             if (wParam == VK_F11) WriteSnapshot("MANUAL SNAPSHOT");
             break;
-        case WM_TIMER:
-            if (wParam == kDiagnosticTimer) CheckRecoveryTimeout();
-            if (wParam == kCursorRecoveryTimer) {
-                KillTimer(window, kCursorRecoveryTimer);
-                ApplyCursorRecovery();
-            }
-            break;
         case WM_DESTROY:
         case WM_NCDESTROY:
             CancelCursorRecovery(true);
@@ -292,19 +333,25 @@ bool InstallHooks(HMODULE self) {
         SetLastError(0);
         g_originalWndProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
             g_window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(HookWndProc)));
-        if (g_originalWndProc) SetTimer(g_window, kDiagnosticTimer, 1000, nullptr);
+        if (g_originalWndProc) {
+            g_scheduleEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            if (g_scheduleEvent)
+                g_schedulerThread = CreateThread(
+                    nullptr, 0, RecoverySchedulerThread, nullptr, 0, nullptr);
+        }
     }
 
     Logger::Instance().Write("DIAGNOSTIC",
-        "ClipCursor-only mode: clip-hook=%s window-hook=%s restore=%s delay=%u wait-display=%s",
+        "ClipCursor-only mode: clip-hook=%s window-hook=%s scheduler=%s restore=%s delay=%u wait-display=%s",
         clipHooked ? "YES" : "NO", g_originalWndProc ? "YES" : "NO",
+        g_schedulerThread ? "WORKER" : "UNAVAILABLE",
         g_restoreCursorClip ? "YES" : "NO", g_restoreCursorClipDelayMs,
         g_waitForDisplayChange ? "YES" : "NO");
     if (!clipHooked)
         Logger::Instance().Write("DIAGNOSTIC", "ClipCursor import not found; restoration unavailable");
     if (!g_originalWndProc)
         Logger::Instance().Write("DIAGNOSTIC", "Game window hook unavailable; restoration unavailable");
-    return clipHooked && g_originalWndProc;
+    return clipHooked && g_originalWndProc && g_schedulerThread;
 }
 
 }  // namespace fd

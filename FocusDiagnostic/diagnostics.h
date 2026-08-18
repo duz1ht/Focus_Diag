@@ -5,6 +5,10 @@
 
 namespace fd {
 
+enum class NullClipClassification : int {
+    None, Pending, FocusTransition, IntentionalRelease
+};
+
 struct DiagnosticState {
     std::atomic<HWND> gameWindow{nullptr};
     std::atomic<bool> recovering{false};
@@ -26,6 +30,17 @@ struct DiagnosticState {
     std::atomic<bool> clipAppliedByDiagnostic{false};
     std::atomic<unsigned long> clipRestoredAttempt{0};
     std::atomic<ULONGLONG> focusReturnedAt{0};
+    std::atomic<bool> nullClipPending{false};
+    std::atomic<ULONGLONG> nullClipAt{0};
+    std::atomic<HWND> nullClipForeground{nullptr};
+    std::atomic<HWND> nullClipFocus{nullptr};
+    std::atomic<bool> nullClipIconic{false};
+    std::atomic<bool> nullClipVisible{false};
+    std::atomic<UINT> nullClipDisplayWidth{0};
+    std::atomic<UINT> nullClipDisplayHeight{0};
+    std::atomic<bool> nullClipWasDllOwned{false};
+    std::atomic<bool> nullClipHadActive{false};
+    std::atomic<NullClipClassification> nullClipClassification{NullClipClassification::None};
 };
 
 DiagnosticState& State();
@@ -36,5 +51,7 @@ void RecordFocusReturn();
 void RecordDisplayChange(UINT width, UINT height);
 void RecordClipState(const RECT* requested, const RECT& actual, bool succeeded);
 void WriteSnapshot(const char* reason);
+HWND WindowThreadFocus(HWND window);
+const char* NullClipClassificationName(NullClipClassification classification);
 
 }  // namespace fd
