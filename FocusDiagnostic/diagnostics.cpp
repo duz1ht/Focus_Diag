@@ -197,6 +197,18 @@ void RecordShutdown(UINT message) {
                              DeactivationEventName(message));
 }
 
+void RecordDirectInputResult(bool mouse, bool acquire, HRESULT result) {
+    if (!mouse) return;
+    auto& state = State();
+    if (acquire) {
+        state.mouseAcquireResult = result;
+        state.mouseAcquireAt = GetTickCount64();
+    } else {
+        state.mouseReadResult = result;
+        state.mouseReadAt = GetTickCount64();
+    }
+}
+
 void WriteSnapshot(const char* reason) {
     const auto& state = State();
     const HWND game = state.gameWindow.load();
@@ -225,6 +237,17 @@ void WriteSnapshot(const char* reason) {
         "expected=(%ld,%ld)-(%ld,%ld) actual=(%ld,%ld)-(%ld,%ld)",
         expected.left, expected.top, expected.right, expected.bottom,
         current.left, current.top, current.right, current.bottom);
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    Logger::Instance().Write("SNAPSHOT",
+        "cursor=%p position=(%ld,%ld) last-set-position=(%ld,%ld) last-set-at=%llu "
+        "show-cursor-result=%d",
+        GetCursor(), cursor.x, cursor.y, state.lastCursorX.load(), state.lastCursorY.load(),
+        state.lastCursorPositionAt.load(), state.showCursorResult.load());
+    Logger::Instance().Write("SNAPSHOT",
+        "dinput-mouse acquire=0x%08lX acquire-at=%llu read=0x%08lX read-at=%llu",
+        static_cast<unsigned long>(state.mouseAcquireResult.load()), state.mouseAcquireAt.load(),
+        static_cast<unsigned long>(state.mouseReadResult.load()), state.mouseReadAt.load());
     Logger::Instance().Write("SNAPSHOT",
         "deactivation-state=%s deactivation-event=%s null-pending=%s null-at=%llu null-foreground=%p "
         "null-focus=%p null-iconic=%s null-visible=%s null-display=%ux%u "

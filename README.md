@@ -1,9 +1,9 @@
 # ClipCursor Recovery — proxy dinput8.dll
 
-DLL proxy x86 dedicada exclusivamente a restaurar o confinamento de cursor de
-jogos antigos depois de Alt-Tab e diagnosticar cada requisito dessa restauração.
-Ela não intercepta DirectInput, Direct3D, `SetCursorPos`, `ShowCursor` ou
-`SetCursor`, e não força foco ou ativação da janela.
+DLL proxy x86 dedicada a restaurar o confinamento de cursor de jogos antigos
+depois de Alt-Tab e diagnosticar cada requisito dessa restauração. Ela observa
+passivamente DirectInput, `SetCursorPos`, `ShowCursor` e `SetCursor`, mas não
+intercepta Direct3D nem força foco, ativação ou aquisição de dispositivos.
 
 ## Compilar
 
@@ -14,8 +14,9 @@ Ela não intercepta DirectInput, Direct3D, `SetCursorPos`, `ShowCursor` ou
 4. Use **Build > Build Solution**.
 
 O resultado é `bin\Release\dinput8.dll`. A proxy encaminha as cinco exportações
-de `dinput8.dll` para a biblioteca original do diretório de sistema; ela não
-inspeciona nem modifica os objetos DirectInput retornados ao jogo.
+de `dinput8.dll` para a biblioteca original do diretório de sistema. Quando o
+diagnóstico DirectInput está habilitado, ela instrumenta passivamente os objetos
+de mouse e teclado retornados ao jogo sem modificar os resultados.
 
 ## Instalar
 
@@ -34,6 +35,13 @@ sistemas anticheat.
 RestoreCursorClip=1
 RestoreCursorClipDelayMs=250
 WaitForDisplayChange=1
+RevalidateCursorClip=1
+RevalidationWindowMs=5000
+MaxClipReapplications=3
+
+[Diagnostics]
+CursorTelemetry=1
+DirectInput=1
 ```
 
 - `RestoreCursorClip=1` habilita a restauração. Use `0` para uma sessão passiva
@@ -42,9 +50,20 @@ WaitForDisplayChange=1
   confirmação do modo de vídeo; o valor é limitado ao intervalo 1–10000 ms.
 - `WaitForDisplayChange=1` espera o retorno das dimensões de tela anteriores ao
   Alt-Tab. Se `WM_DISPLAYCHANGE` não chegar, existe um fallback de dois segundos.
+- `RevalidateCursorClip=1` mantém uma observação limitada depois da restauração,
+  verificando o retângulo em 500 ms, 2 s e ao fim de `RevalidationWindowMs`.
+  Uma divergência com o jogo ainda ativo é reaplicada no máximo
+  `MaxClipReapplications` vezes, evitando uma disputa infinita com overlays.
+- `CursorTelemetry=1` registra passivamente `ShowCursor`, `SetCursor`,
+  `SetCursorPos` e `WM_SETCURSOR`. Coordenadas centrais e negativas são
+  destacadas para diagnosticar o cursor do Windows piscando no centro.
+- `DirectInput=1` registra criação dos dispositivos de mouse/teclado,
+  `SetCooperativeLevel`, `Acquire`, `Unacquire` e falhas em leituras. O modo não
+  força aquisição nem modifica o nível cooperativo.
 
-Não existem opções para DirectInput, Direct3D, visibilidade do cursor, captura ou
-ativação forçada porque esses subsistemas não fazem parte desta DLL.
+Não existem correções forçadas para DirectInput, Direct3D, visibilidade do
+cursor, captura ou ativação. Fora do confinamento, esses subsistemas são apenas
+observados para diagnóstico.
 
 ## Processo de restauração
 
@@ -60,7 +79,9 @@ ativação forçada porque esses subsistemas não fazem parte desta DLL.
    retângulos forem diferentes.
 6. Depois da chamada, `GetClipCursor` confirma se o retângulo esperado foi
    realmente aplicado.
-7. Cada tentativa é identificada por uma geração e processada uma única vez.
+7. Após o primeiro sucesso, uma janela limitada de revalidação detecta se outro
+   componente liberou o clip e pode reaplicá-lo até o limite configurado.
+8. Cada tentativa é identificada por uma geração e processada uma única vez.
    Rearmes, nova perda de foco e tentativas posteriores invalidam agendamentos
    anteriores. Em nova perda de foco, somente um clipping aplicado pela própria
    DLL é liberado.
@@ -84,7 +105,11 @@ O log contém apenas informações necessárias para avaliar a restauração:
 - estado da desativação (`DEACTIVATION_PENDING`, retorno confirmado, solicitação
   de fechamento ou `SHUTDOWN`), com foreground, foco, display e propriedade do
   clipping;
-- snapshots manuais e automáticos de sucesso ou falha.
+- snapshots manuais e automáticos de sucesso ou falha;
+- divergências tardias do clip, reaplicações e conclusão da janela de observação;
+- contador retornado por `ShowCursor`, handles de `SetCursor`, posições solicitadas
+  por `SetCursorPos` e mensagens `WM_SETCURSOR`;
+- aquisição e falhas de leitura do mouse DirectInput associadas à tentativa.
 
 Durante o teste:
 
@@ -109,9 +134,12 @@ solicitação; `WM_DESTROY`, `WM_NCDESTROY` ou `WM_ENDSESSION TRUE` confirmam
 
 ## Limitações
 
-- Apenas chamadas de `ClipCursor` importadas diretamente pelo executável
-  principal são interceptadas. Chamadas feitas por módulos auxiliares ou obtidas
-  por `GetProcAddress` não são observadas.
+- Apenas chamadas de `ClipCursor`, `ShowCursor`, `SetCursor` e `SetCursorPos`
+  importadas diretamente pelo executável principal são interceptadas. Chamadas
+  feitas por módulos auxiliares ou obtidas por `GetProcAddress` não são observadas.
 - A localização da janela considera a primeira janela superior, visível e sem
   proprietário pertencente ao processo.
-- A DLL restaura confinamento, não visibilidade nem imagem do cursor.
+- A DLL restaura confinamento, mas apenas diagnostica visibilidade, imagem e
+  reposicionamento do cursor; ela não força esses estados.
+- A instrumentação DirectInput é passiva: não chama `Acquire` em nome do jogo e
+  não altera o nível cooperativo.

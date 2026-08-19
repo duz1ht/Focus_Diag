@@ -28,7 +28,9 @@ extern "C" HRESULT WINAPI DirectInput8Create(HINSTANCE instance, DWORD version, 
                                                LPVOID* output, LPUNKNOWN outer) {
     const auto real = reinterpret_cast<DirectInput8CreateFn>(RealExport("DirectInput8Create"));
     if (!real) return HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND);
-    return real(instance, version, iid, output, outer);
+    const HRESULT result = real(instance, version, iid, output, outer);
+    if (SUCCEEDED(result) && output && *output) fd::ObserveDirectInput8(*output);
+    return result;
 }
 
 extern "C" HRESULT WINAPI DllCanUnloadNow() {

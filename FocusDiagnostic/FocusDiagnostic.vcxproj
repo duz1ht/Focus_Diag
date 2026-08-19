@@ -34,7 +34,7 @@
     <Link><SubSystem>Windows</SubSystem><EnableCOMDATFolding>true</EnableCOMDATFolding><OptimizeReferences>true</OptimizeReferences><GenerateDebugInformation>true</GenerateDebugInformation><ModuleDefinitionFile>dinput8_proxy.def</ModuleDefinitionFile></Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="diagnostics.cpp" /><ClCompile Include="dinput8_proxy.cpp" /><ClCompile Include="dllmain.cpp" /><ClCompile Include="hooks.cpp" /><ClCompile Include="logger.cpp" />
+    <ClCompile Include="diagnostics.cpp" /><ClCompile Include="directinput_diagnostics.cpp" /><ClCompile Include="dinput8_proxy.cpp" /><ClCompile Include="dllmain.cpp" /><ClCompile Include="hooks.cpp" /><ClCompile Include="logger.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="dinput8_proxy.def" />

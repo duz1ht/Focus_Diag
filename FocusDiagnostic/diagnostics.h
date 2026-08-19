@@ -41,6 +41,15 @@ struct DiagnosticState {
     std::atomic<UINT> nullClipDisplayHeight{0};
     std::atomic<bool> nullClipWasDllOwned{false};
     std::atomic<bool> nullClipHadActive{false};
+    std::atomic<int> showCursorResult{0};
+    std::atomic<HCURSOR> lastCursor{nullptr};
+    std::atomic<LONG> lastCursorX{0};
+    std::atomic<LONG> lastCursorY{0};
+    std::atomic<ULONGLONG> lastCursorPositionAt{0};
+    std::atomic<HRESULT> mouseAcquireResult{S_OK};
+    std::atomic<HRESULT> mouseReadResult{S_OK};
+    std::atomic<ULONGLONG> mouseAcquireAt{0};
+    std::atomic<ULONGLONG> mouseReadAt{0};
     std::atomic<DeactivationState> deactivationState{DeactivationState::None};
     std::atomic<UINT> deactivationEvent{0};
 };
@@ -57,6 +66,7 @@ void RecordCloseCancelled();
 void RecordShutdown(UINT message);
 void WriteSnapshot(const char* reason);
 HWND WindowThreadFocus(HWND window);
+void RecordDirectInputResult(bool mouse, bool acquire, HRESULT result);
 const char* DeactivationStateName(DeactivationState state);
 const char* DeactivationEventName(UINT message);
 
