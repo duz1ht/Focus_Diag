@@ -73,7 +73,8 @@ novas solicitações do jogo.
 O log contém apenas informações necessárias para avaliar a restauração:
 
 - chamadas de `ClipCursor`, resultado da chamada e retângulo real;
-- `WM_ACTIVATE`, `WM_ACTIVATEAPP`, `WM_SETFOCUS` e `WM_KILLFOCUS`;
+- `WM_ACTIVATE`, `WM_ACTIVATEAPP`, `WM_SETFOCUS`, `WM_KILLFOCUS` e `WM_SIZE`,
+  incluindo o estado e as dimensões da área cliente da janela;
 - `WM_DISPLAYCHANGE` e comparação com as dimensões anteriores;
 - instante do agendamento, prazo solicitado, atraso real e atraso excedente da
   thread agendadora;

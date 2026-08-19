@@ -30,6 +30,17 @@ std::recursive_mutex g_recoveryMutex;
 
 BOOL WINAPI HookClipCursor(const RECT* rect);
 
+const char* WindowSizeStateName(WPARAM state) {
+    switch (state) {
+        case SIZE_RESTORED: return "SIZE_RESTORED";
+        case SIZE_MINIMIZED: return "SIZE_MINIMIZED";
+        case SIZE_MAXIMIZED: return "SIZE_MAXIMIZED";
+        case SIZE_MAXSHOW: return "SIZE_MAXSHOW";
+        case SIZE_MAXHIDE: return "SIZE_MAXHIDE";
+        default: return "SIZE_UNKNOWN";
+    }
+}
+
 struct Settings {
     bool restoreCursorClip = true;
     bool waitForDisplayChange = true;
@@ -283,6 +294,10 @@ LRESULT CALLBACK HookWndProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
             Logger::Instance().Write("FOCUS", "WM_KILLFOCUS");
             CancelCursorRecovery(true);
             BeginFocusLoss(message);
+            break;
+        case WM_SIZE:
+            Logger::Instance().Write("WINDOW", "WM_SIZE -> %s (%ux%u)",
+                WindowSizeStateName(wParam), LOWORD(lParam), HIWORD(lParam));
             break;
         case WM_DISPLAYCHANGE: {
             const UINT width = LOWORD(lParam);
