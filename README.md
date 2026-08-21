@@ -1,33 +1,33 @@
-# ClipCursor Recovery — proxy dinput8.dll
+# ClipCursor Recovery — dinput8.dll proxy
 
-DLL proxy x86 dedicada exclusivamente a restaurar o confinamento de cursor de
-jogos antigos depois de Alt-Tab e diagnosticar cada requisito dessa restauração.
-Ela não intercepta DirectInput, Direct3D, `SetCursorPos`, `ShowCursor` ou
-`SetCursor`, e não força foco ou ativação da janela.
+An x86 DLL proxy dedicated exclusively to restoring cursor confinement in older
+games after Alt-Tab and diagnosing every requirement involved in that recovery.
+It does not intercept DirectInput, Direct3D, `SetCursorPos`, `ShowCursor`, or
+`SetCursor`, and it does not force window focus or activation.
 
-## Compilar
+## Building
 
-1. No Visual Studio 2022, instale **Desenvolvimento para desktop com C++** e o
+1. In Visual Studio 2022, install **Desktop development with C++** and the
    Windows 10/11 SDK.
-2. Abra `FocusDiagnostic.sln`.
-3. Selecione **Release** e **x86**.
+2. Open `FocusDiagnostic.sln`.
+3. Select **Release** and **x86**.
 4. Use **Build > Build Solution**.
 
-O resultado é `bin\Release\dinput8.dll`. A proxy encaminha as cinco exportações
-de `dinput8.dll` para a biblioteca original do diretório de sistema; ela não
-inspeciona nem modifica os objetos DirectInput retornados ao jogo.
+The output is `bin\Release\dinput8.dll`. The proxy forwards the five exports
+from `dinput8.dll` to the original library in the system directory; it does not
+inspect or modify the DirectInput objects returned to the game.
 
-## Instalar
+## Installation
 
-Copie `bin\Release\dinput8.dll` e `bin\Release\FocusDiagnostic.ini` para a pasta
-do executável do jogo. O jogo deve ser x86 e importar `dinput8.dll`. Não substitua
-outra DLL com o mesmo nome sem antes identificar a qual mod ela pertence.
+Copy `bin\Release\dinput8.dll` and `bin\Release\FocusDiagnostic.ini` to the
+folder containing the game's executable. The game must be x86 and import
+`dinput8.dll`. Do not replace another DLL with the same name before identifying
+which mod it belongs to.
 
-Quando carregada, a DLL cria `FocusDiagnostic.log` ao lado dela. Faça testes
-somente em uma cópia local/offline do jogo; proxies podem ser sinalizadas por
-sistemas anticheat.
+When loaded, the DLL creates `FocusDiagnostic.log` next to it. Test only with a
+local/offline copy of the game; proxies may be flagged by anti-cheat systems.
 
-## Configuração
+## Configuration
 
 ```ini
 [Recovery]
@@ -36,82 +36,83 @@ RestoreCursorClipDelayMs=250
 WaitForDisplayChange=1
 ```
 
-- `RestoreCursorClip=1` habilita a restauração. Use `0` para uma sessão passiva
-  que registra o processo sem chamar `ClipCursor` para restaurar.
-- `RestoreCursorClipDelayMs` define a estabilização após o retorno do foco ou a
-  confirmação do modo de vídeo; o valor é limitado ao intervalo 1–10000 ms.
-- `WaitForDisplayChange=1` espera o retorno das dimensões de tela anteriores ao
-  Alt-Tab. Se `WM_DISPLAYCHANGE` não chegar, existe um fallback de dois segundos.
+- `RestoreCursorClip=1` enables recovery. Use `0` for a passive session that
+  logs the process without calling `ClipCursor` to restore confinement.
+- `RestoreCursorClipDelayMs` sets the stabilization delay after focus returns or
+  the video mode is confirmed; the value is clamped to the 1–10000 ms range.
+- `WaitForDisplayChange=1` waits for the screen dimensions from before Alt-Tab
+  to return. If `WM_DISPLAYCHANGE` does not arrive, there is a two-second
+  fallback.
 
-Não existem opções para DirectInput, Direct3D, visibilidade do cursor, captura ou
-ativação forçada porque esses subsistemas não fazem parte desta DLL.
+There are no options for DirectInput, Direct3D, cursor visibility, capture, or
+forced activation because those subsystems are outside the scope of this DLL.
 
-## Processo de restauração
+## Recovery process
 
-1. O hook passivo de `ClipCursor` registra solicitações bem-sucedidas do jogo e
-   consulta o retângulo realmente aplicado com `GetClipCursor`.
-2. Na perda de foco, a DLL memoriza se havia clipping ativo, o último retângulo
-   aplicado e as dimensões atuais da tela.
-3. No retorno do foco, uma thread agendadora espera a confirmação do modo de
-   vídeo ou o fallback sem depender de `WM_TIMER` nem da fila de mensagens do jogo.
-4. Antes de agir, exige que a janela do jogo seja foreground, tenha foco, esteja
-   visível e não esteja minimizada.
-5. Ela compara o retângulo atual com o esperado. `ClipCursor` só é chamado se os
-   retângulos forem diferentes.
-6. Depois da chamada, `GetClipCursor` confirma se o retângulo esperado foi
-   realmente aplicado.
-7. Cada tentativa é identificada por uma geração e processada uma única vez.
-   Rearmes, nova perda de foco e tentativas posteriores invalidam agendamentos
-   anteriores. Em nova perda de foco, somente um clipping aplicado pela própria
-   DLL é liberado.
+1. The passive `ClipCursor` hook logs successful requests from the game and
+   queries the rectangle that was actually applied with `GetClipCursor`.
+2. When focus is lost, the DLL records whether clipping was active, the last
+   rectangle applied, and the current screen dimensions.
+3. When focus returns, a scheduler thread waits for video mode confirmation or
+   the fallback without depending on `WM_TIMER` or the game's message queue.
+4. Before taking action, it requires the game window to be in the foreground,
+   have focus, be visible, and not be minimized.
+5. It compares the current rectangle with the expected one. `ClipCursor` is
+   called only if the rectangles differ.
+6. After the call, `GetClipCursor` confirms whether the expected rectangle was
+   actually applied.
+7. Each attempt is identified by a generation and processed only once.
+   Rearming, another loss of focus, and subsequent attempts invalidate earlier
+   schedules. On a new loss of focus, only clipping applied by the DLL itself is
+   released.
 
-Chamadas internas usam a função original diretamente e não são registradas como
-novas solicitações do jogo.
+Internal calls use the original function directly and are not logged as new
+requests from the game.
 
-## Diagnóstico
+## Diagnostics
 
-O log contém apenas informações necessárias para avaliar a restauração:
+The log contains only the information needed to evaluate recovery:
 
-- chamadas de `ClipCursor`, resultado da chamada e retângulo real;
-- `WM_ACTIVATE`, `WM_ACTIVATEAPP`, `WM_SETFOCUS`, `WM_KILLFOCUS` e `WM_SIZE`,
-  incluindo o estado e as dimensões da área cliente da janela;
-- `WM_DISPLAYCHANGE` e comparação com as dimensões anteriores;
-- instante do agendamento, prazo solicitado, atraso real e atraso excedente da
-  thread agendadora;
-- validação de foreground, foco, visibilidade e minimização;
-- retângulos esperado, anterior e posterior;
-- se a restauração era necessária, se a chamada funcionou e se foi confirmada;
-- estado da desativação (`DEACTIVATION_PENDING`, retorno confirmado, solicitação
-  de fechamento ou `SHUTDOWN`), com foreground, foco, display e propriedade do
-  clipping;
-- snapshots manuais e automáticos de sucesso ou falha.
+- `ClipCursor` calls, the call result, and the actual rectangle;
+- `WM_ACTIVATE`, `WM_ACTIVATEAPP`, `WM_SETFOCUS`, `WM_KILLFOCUS`, and `WM_SIZE`,
+  including the state and dimensions of the window's client area;
+- `WM_DISPLAYCHANGE` and a comparison with the previous dimensions;
+- scheduling time, requested deadline, actual delay, and scheduler thread
+  overshoot;
+- validation of foreground status, focus, visibility, and minimization;
+- expected, previous, and resulting rectangles;
+- whether recovery was necessary, whether the call worked, and whether it was
+  confirmed;
+- deactivation state (`DEACTIVATION_PENDING`, confirmed return, close request,
+  or `SHUTDOWN`), including foreground, focus, display, and clipping ownership;
+- manual and automatic success or failure snapshots.
 
-Durante o teste:
+During testing:
 
-1. Entre no gameplay e pressione **F10** para inserir `USER MARKER`.
-2. Faça Alt-Tab e retorne ao jogo.
-3. Pressione **F11** para gravar um snapshot manual.
-4. Feche normalmente o jogo e preserve `FocusDiagnostic.log`.
+1. Enter gameplay and press **F10** to insert a `USER MARKER`.
+2. Alt-Tab away from the game and return to it.
+3. Press **F11** to record a manual snapshot.
+4. Close the game normally and preserve `FocusDiagnostic.log`.
 
-Uma tentativa bem-sucedida termina com `CLIP RESTORATION SUCCESS` e
-`restored=YES`. Se nenhum clipping ativo foi observado antes da perda de foco, o
-log informa `NO ACTIVE CLIP CAPTURED BEFORE FOCUS LOSS`; nesse caso não existe um
-retângulo válido para restaurar.
+A successful attempt ends with `CLIP RESTORATION SUCCESS` and `restored=YES`.
+If no active clipping was observed before focus was lost, the log reports
+`NO ACTIVE CLIP CAPTURED BEFORE FOCUS LOSS`; in that case, there is no valid
+rectangle to restore.
 
-Quando o jogo chama `ClipCursor(NULL)` antes das mensagens formais de perda de
-foco, a DLL mantém o último retângulo ativo como candidato. Perda de foco,
-desativação e mudança de display produzem apenas `DEACTIVATION_PENDING`, pois
-também acontecem durante o encerramento. A transição só se torna
-`FOCUS_TRANSITION_CONFIRMED` quando a mesma janela válida recupera foreground e
-foco, continua visível e não está minimizada. `WM_CLOSE` registra apenas uma
-solicitação; `WM_DESTROY`, `WM_NCDESTROY` ou `WM_ENDSESSION TRUE` confirmam
-`SHUTDOWN` e cancelam a recuperação.
+When the game calls `ClipCursor(NULL)` before the formal focus-loss messages,
+the DLL keeps the last active rectangle as a candidate. Focus loss,
+deactivation, and display changes only produce `DEACTIVATION_PENDING`, because
+they can also occur during shutdown. The transition becomes
+`FOCUS_TRANSITION_CONFIRMED` only when the same valid window regains foreground
+status and focus while remaining visible and not minimized. `WM_CLOSE` logs only
+a request; `WM_DESTROY`, `WM_NCDESTROY`, or `WM_ENDSESSION TRUE` confirms
+`SHUTDOWN` and cancels recovery.
 
-## Limitações
+## Limitations
 
-- Apenas chamadas de `ClipCursor` importadas diretamente pelo executável
-  principal são interceptadas. Chamadas feitas por módulos auxiliares ou obtidas
-  por `GetProcAddress` não são observadas.
-- A localização da janela considera a primeira janela superior, visível e sem
-  proprietário pertencente ao processo.
-- A DLL restaura confinamento, não visibilidade nem imagem do cursor.
+- Only `ClipCursor` calls imported directly by the main executable are
+  intercepted. Calls made by auxiliary modules or obtained through
+  `GetProcAddress` are not observed.
+- Window discovery considers the first top-level, visible, unowned window that
+  belongs to the process.
+- The DLL restores confinement, not cursor visibility or appearance.
